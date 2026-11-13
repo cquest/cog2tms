@@ -3,18 +3,25 @@
 Only the tags needed to read pixel windows by byte-range are parsed. Supported:
 little/big endian classic TIFF and BigTIFF, tiled layout, planar contig, no
 rotation; compressions None/Deflate/LZW/PackBits/JPEG (JPEG-in-TIFF blocks are
-spliced with JPEGTables then decoded by Pillow). TileOffsets/TileByteCounts are
-fetched lazily, per overview level, so opening a COG stays cheap.
+spliced with JPEGTables then decoded by simplejpeg, Pillow as fallback).
+TileOffsets/TileByteCounts are fetched lazily, per overview level, so opening a
+COG stays cheap.
 """
 import struct
 import zlib
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
 import numpy as np
 from PIL import Image
 
 from . import config, crs
+
+try:  # ~3x faster than Pillow on JPEG-in-TIFF, same pixels, and releases the GIL
+    from simplejpeg import decode_jpeg as _sjpeg
+except ImportError:  # exotic platforms: Pillow only
+    _sjpeg = None
 
 
 class CogError(Exception):
@@ -37,6 +44,24 @@ _DT = {8: "u1", 16: "u2", 32: "u4"}
 # hundred bytes) instead of whole: L0 of a big COG indexes millions of blocks
 # (~6 MB of pure metadata) but a tile touches a handful of them.
 _SLICE_AT = 1 << 20
+
+# threads used to decode the blocks of one window when that is worth it (the pool
+# is created on first use); see _threaded_decode
+_POOL = (ThreadPoolExecutor(max_workers=config.DECODE_THREADS, thread_name_prefix="cog-decode")
+         if config.DECODE_THREADS > 1 else None)
+
+# the handoff to those threads costs ~0.3 ms: it pays from about a megapixel of
+# source blocks (8 x 512^2 measured -3.1 ms, 4 x 128^2 +0.3 ms)
+_PAR_MIN_PX = 1 << 20
+
+
+def _threaded_decode(lvl: "_Level", n: int) -> bool:
+    """Whether the n blocks of a window are worth decoding in threads."""
+    if n < 2 or n * lvl.tilew * lvl.tileh < _PAR_MIN_PX:
+        return False
+    if lvl.compression in (6, 7):
+        return _sjpeg is not None  # Pillow keeps the GIL while decoding JPEG
+    return lvl.compression in (8, 32946)  # zlib releases it; our LZW/PackBits are Python
 
 
 def _scalar(end, tags, code):
@@ -369,12 +394,16 @@ class CogFile:
             base = tj0 * lvl.cols + ti0
             offs, cnts = lvl.index(base, tj1 * lvl.cols + ti1)
             spans = [(int(offs[idx - base]), int(cnts[idx - base])) for _k, idx in missing]
-            for (k, _idx), raw in zip(missing, self.reader.read_many(spans)):
-                blk = self._decode(lvl, raw)
+            raws = self.reader.read_many(spans)
+            if _POOL is not None and _threaded_decode(lvl, len(raws)):
+                decoded = list(_POOL.map(lambda raw: self._decode(lvl, raw), raws))
+            else:
+                decoded = [self._decode(lvl, raw) for raw in raws]
+            for (k, _idx), blk in zip(missing, decoded):
                 blocks[k] = blk
                 self._cache[k] = blk
-                while len(self._cache) > config.BLOCK_CACHE:
-                    self._cache.popitem(last=False)
+            while len(self._cache) > config.BLOCK_CACHE:
+                self._cache.popitem(last=False)
 
         for tj in range(tj0, tj1 + 1):
             for ti in range(ti0, ti1 + 1):
@@ -392,7 +421,7 @@ class CogFile:
     def _decode(self, lvl: _Level, raw: bytes) -> np.ndarray:
         th, tw, s, comp = lvl.tileh, lvl.tilew, lvl.samples, lvl.compression
         if comp in (6, 7):
-            a = self._decode_jpeg(raw, lvl.jpegtables)
+            a = self._decode_jpeg(raw, lvl.jpegtables, s)
             if a.shape[2] not in (s, 1):
                 raise CogError(f"unexpected JPEG band count {a.shape[2]}")
             return a
@@ -423,7 +452,7 @@ class CogFile:
         return a
 
     @staticmethod
-    def _decode_jpeg(raw: bytes, jpegtables: bytes | None) -> np.ndarray:
+    def _decode_jpeg(raw: bytes, jpegtables: bytes | None, samples: int) -> np.ndarray:
         # JPEG-in-TIFF: blocks may miss the DQT/DHT segments (stored once in the
         # IFD JPEGTables tag) -> splice IFD tables + block body, GDAL-style.
         if jpegtables:
@@ -432,9 +461,17 @@ class CogFile:
                 tab = tab[:-2]  # drop trailing EOI
             body = raw[2:] if raw[:2] == b"\xff\xd8" else raw
             raw = tab + body
+        # GRAY for 1-sample levels only: a 3-component JPEG decoded as GRAY is not Pillow's L
+        mode = "GRAY" if samples == 1 else "RGB"
+        if _sjpeg is not None:
+            try:
+                return _sjpeg(raw, colorspace=mode)
+            except Exception:
+                pass  # Pillow is more permissive on odd streams
         im = Image.open(BytesIO(raw))
         im.load()
-        return np.asarray(im.convert("RGB"))
+        a = np.asarray(im.convert("L" if samples == 1 else "RGB"))
+        return a[..., None] if a.ndim == 2 else a
 
     @staticmethod
     def _ycbcr_to_rgb(a: np.ndarray) -> np.ndarray:

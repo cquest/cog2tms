@@ -23,7 +23,7 @@ GeoTIFF), `502` (upstream timeout/error).
 
 | Topic | Decision |
 |---|---|
-| Engine | **No GDAL / no rio-tiler.** Pure-Python COG reader over `requests` byte-range; images with Pillow+numpy. Small surface, no native wheel, full control of what is fetched. |
+| Engine | Pure-Python COG reader over `requests` byte-range; images with Pillow+numpy; JPEG-in-TIFF blocks decoded by **simplejpeg** (2.8× Pillow, identical pixels, releases the GIL) with a Pillow fallback; warp/resample by **`cv2.remap`** (opencv-python-headless, ×12 over numpy gather — the one heavy wheel, 61 MB, accepted for the render win). Small surface, prebuilt wheels only, full control of what is fetched. |
 | Y orientation | **OSM-style XYZ** (Y points down). Pass-through, no flip. A unit test pins the convention. |
 | Out-of-bounds tiles | **200 + empty tile**: fully transparent PNG (alpha=0); JPEG has no alpha → solid fill, configurable `EMPTY_TILE_BG` (default `0,0,0`). |
 | MVP formats | **PNG and JPEG** (WebP maybe later). |
@@ -31,15 +31,17 @@ GeoTIFF), `502` (upstream timeout/error).
 
 ## Stack
 
-- Python 3.12, **FastAPI + uvicorn**, **requests** (Range reads), **numpy** (warp/resample),
-  **Pillow** (JPEG-in-TIFF decode, PNG/JPEG output); pytest + httpx for dev.
-- No GDAL env vars needed anymore.
+- Python 3.12, **FastAPI + uvicorn**, **requests** (Range reads), **numpy**,
+  **opencv-python-headless** (`cv2.remap` warp, the one heavy wheel: 61 MB,
+  no system libraries), **simplejpeg** (JPEG-in-TIFF decode, ~0.4 MB wheel; Pillow takes over if it is not
+  importable), **Pillow** (PNG/JPEG output, fallback JPEG decode); pytest + httpx for dev.
 
 ### Supported COG features (`app/geotiff.py`)
 
-- Classic TIFF **and BigTIFF** (Anglet2025 is BigTIFF); tiled layout, planar contig, no rotation.
+- Classic TIFF and BigTIFF (Anglet2025 is BigTIFF); tiled layout, planar contig, no rotation.
 - Compressions: None, Deflate (+predictor 2), LZW, PackBits, **JPEG (old-style)**: blocks lack
-  DQT/DHT → splice IFD `JPEGTables` (minus trailing EOI) + block body, then Pillow (GDAL recipe).
+  DQT/DHT → splice IFD `JPEGTables` (minus trailing EOI) + block body (GDAL recipe), then
+  simplejpeg (`colorspace="RGB"`, or `"GRAY"` for 1-sample levels — Pillow used as fallback).
 - Internal overviews (`NewSubfileType & 1`), **1-bit internal masks** (`& 4`) → `valid` mask.
 - GeoTIFF tags: ModelTiepoint/PixelScale (no ModelTransformation), GeoKeyDirectory(+DoubleParams),
   GDAL_NODATA, ExtraSamples→alpha.
@@ -49,11 +51,22 @@ GeoTIFF), `502` (upstream timeout/error).
 
 ### Warp pipeline (`app/tiles.py`)
 
-Overview level chosen so the source window ≥ tile/2 px → read blocks via
+Overview level chosen so the source window ≥ tile/2 px (window **not clamped
+to the raster** — `_window` pads outside pixels with zeros + `valid=False`, so
+tiles straddling the COG edge go transparent instead of smearing the last
+row/column) → read blocks via
 `reader.read_many` (adjacent ranges merged within `MERGE_GAP`, groups fetched
-in parallel) → per-pixel source coords (exact affine if source is 3857, else
+in parallel) → decode (`_window`: blocks inline, or in the shared `_POOL` when
+the window is ≥ 1 Mpx of blocks **and** the codec releases the GIL — JPEG needs
+simplejpeg, deflate uses zlib; cache filled in the calling thread) → per-pixel
+source coords (exact affine if source is 3857, else
 **17×17 inverse-projection control grid** bilinearly interpolated) → bilinear
-gather with mask-aware renormalization (float32) → PNG RGBA (`compress_level=1`) / JPEG.
+resample by `cv2.remap` (float32 maps; `data*valid` and `valid` remapped with
+`BORDER_CONSTANT`, then divided: out-of-window/out-of-footprint samples
+contribute 0 to both, so invalid pixels divide to exactly 0 — no clamp, no
+branch) → PNG RGBA (`compress_level=1`) / JPEG.
+`cv2.setNumThreads(1)` at import: internal threading gains nothing at 256² and
+would oversubscribe across uvicorn workers.
 
 ### Performance levers (measured on Bayonne COG)
 
@@ -73,6 +86,24 @@ gather with mask-aware renormalization (float32) → PNG RGBA (`compress_level=1
   `MULTIRANGE=0` forces single ranges.
 - In-process **encoded-tile LRU** (`TILE_CACHE`) + per-key `asyncio.Lock`
   single-flight: repeat of a tile ≈ 2 ms.
+- **Block decode**: simplejpeg 74 µs vs Pillow 210 µs per 128² JPEG block
+  (512²: 1.7 ms vs 3.6 ms), `max|diff| = 0` on real Bayonne/Anglet blocks; and
+  since Pillow holds the GIL while decoding JPEG (64 blocks: 30.9 ms @1 thread →
+  33.8 ms @8) while simplejpeg/zlib don't (21.1 → 6.7 ms @4), `_window` decodes
+  big block sets in `_POOL` (`DECODE_THREADS`, gated by `_PAR_MIN_PX` = 1 Mpx
+  because the handoff costs ≈ 0.3 ms). Measured decode+assemble per render:
+  Bayonne z18 1.8 → 0.6 ms, Anglet z17 4.1 → 2.1 ms, Anglet z19 (8 × 512²)
+  13.4 → 5.6 ms; cold end-to-end renders gain 0–20 % (decode is 2–20 % of a
+  render: overviews keep the block count per tile at 1–8).
+- **Warp = `cv2.remap`** (opencv-python-headless): the bilinear gather was the
+  dominant render step, 16.0–18.4 ms per 256² tile on real captured inputs
+  (4 fancy gathers 6.25 ms + weights 2.4 ms + mul/add 2.85 ms + epilogue);
+  remap of premultiplied `data*valid` + `valid` + renorm: **1.4–2.0 ms**
+  (remap itself 0.11 ms), pixels identical within 1 level, validity identical;
+  GIL released (4 threads: 0.18 vs 0.62 ms/op). A dependency-free numpy rewrite
+  only reaches ≈11 ms. Warm render (decode+warp, blocks cached) ≈20 ms →
+  4.3–6.1 ms; live cold tiles +19–54 % (Bayonne z18 67→33 ms, Anglet z17
+  96→59 ms), cached tiles unchanged ≈2 ms.
 
 ### Cache coherence (COG replaced under the same URL)
 
@@ -123,11 +154,11 @@ gather with mask-aware renormalization (float32) → PNG RGBA (`compress_level=1
 ```
 cog2tms/
 ├── AGENTS.md
-├── pyproject.toml         # fastapi, uvicorn[standard], requests, pillow, numpy ; dev: pytest, httpx
+├── pyproject.toml         # fastapi, uvicorn[standard], requests, pillow, simplejpeg, numpy, opencv-python-headless ; dev: pytest, httpx
 ├── app/
 │   ├── main.py            # routes + error mapping + TileJSON + geojson + CORS
 │   ├── cogpool.py         # LRU/TTL pool of open CogFile + render semaphore
-│   ├── geotiff.py         # TIFF/BigTIFF parser, decoders, window reader
+│   ├── geotiff.py         # TIFF/BigTIFF parser, decoders (simplejpeg+Pillow, block pool), window reader
 │   ├── httprange.py       # RangeReader (requests) / LocalReader, range merging,
 │   │                      # retries, negative cache, ETag/If-Range version anchors,
 │   │                      # own 30x walking with check_url on every Location
@@ -144,6 +175,7 @@ cog2tms/
 │   ├── test_retries.py    # fault injection: 429/5xx retries, negative cache
 │   ├── test_versions.py   # coherence when the COG is replaced under one URL
 │   ├── test_redirects.py  # own 30x walking + per-hop check_url + target moves
+│   ├── test_codecs.py     # JPEG-in-TIFF fixtures, simplejpeg/Pillow parity, threaded decode
 │   └── test_network.py    # integration on remote COGs (`network` marker) + relay proxy proof
 ├── Dockerfile             # python:3.12-slim → pip install . → uvicorn --workers 4
 └── README.md
@@ -154,7 +186,7 @@ Code style: **minimal code and comments**, idiomatic, no over-engineering.
 ## App settings (env)
 
 `MAX_ZOOM` (24), `EMPTY_TILE_BG`, `READER_TTL` (600s), `POOL_SIZE` (64),
-`MAX_CONCURRENT_READS` (8), `BLOCK_CACHE` (1500 blocks/COG), `MERGE_GAP` (4 KB),
+`MAX_CONCURRENT_READS` (8), `BLOCK_CACHE` (1500 blocks/COG), `DECODE_THREADS` (4 block-decode threads, 1 = inline), `MERGE_GAP` (4 KB),
 `TILE_CACHE` (1024 encoded tiles, LRU, 0 disables), `PNG_COMPRESS` (1),
 `HEAD_PREFETCH` (65536 B bulk head read at open), `MULTIRANGE` (1, multi-range GETs),
 `HTTP_CONNECT_TIMEOUT` (10), `HTTP_READ_TIMEOUT` (30), `HTTP_RETRIES` (2, on
@@ -186,14 +218,25 @@ Anglet center tile: `13/4061/2994`, `17/64982/47917`.
 ## Tests
 
 ### Unit (offline, default: `pytest`)
-Fixtures are written **in pure Python by conftest** (tiled TIFF + DEFLATE + internal 2×
-overview + GeoTIFF tags): one EPSG:4326 COG, one EPSG:3857 COG (same content), served by a
-local Range-capable HTTP server that counts bytes. Coverage: center tile PNG; **XYZ
+Fixtures are written **in pure Python by conftest** (tiled TIFF + internal 2×
+overview + GeoTIFF tags): one EPSG:4326 COG, one EPSG:3857 COG (same content), one
+**JPEG-in-TIFF** COG (compression 7, per-block tables, Photometric 6) and a
+**single-band JPEG** one, served by a local Range-capable HTTP server that counts
+bytes. Coverage: center tile PNG; **XYZ
 convention pinned** (red square drawn in the northern half must render in the tile's upper
-half); JPEG + quality; out-of-bounds → transparent PNG / solid JPEG; 400 paths (zoom, x/y,
+half); JPEG + quality; out-of-bounds → transparent PNG / solid JPEG; **edge
+tile**: the tile straddling the fixture's east edge renders transparent >2 tile-px
+outside the footprint (4326 and 3857 paths), and `_sample` given `fx/fy` whose
+stencil lies outside the window yields transparent pixels, not clamped edge
+values; 400 paths (zoom, x/y,
 format, scheme, bidx, rescale); 404 missing COG; `size`/`bidx`; TileJSON/GeoJSON/healthz;
 **reprojection parity** 4326 vs 3857 (MSE < 100); local byte-range proof (served ≪ file
-size, every request has `Range:`); multi-range fallback learned per host; fault-injection
+size, every request has `Range:`); multi-range fallback learned per host; **codecs**:
+JPEG-in-TIFF fixture renders like the deflate one (mean diff 0.3, max 3) and stays
+north-up, single-band JPEG blocks (GRAY) work, simplejpeg vs Pillow renders differ by
+≤ 2 levels (usually 0), pooled decode byte-identical to inline, `_threaded_decode`
+gating (GIL-free codec + ≥1 Mpx window), blocks really decoded in `cog-decode` threads;
+fault-injection
 servers for transparent 429/5xx retries (Retry-After honored, bounded attempts) and the
 404/403 negative cache; **version coherence** with a mutable in-memory COG server
 (ETag/If-Range/size drift → `CogChanged`, whole-file 200 body never read, 1-byte probe
@@ -208,13 +251,16 @@ tile re-rendered on the new target).
 
 ### Integration (`pytest -m network`, excluded by default)
 - z18 Bayonne → 200 non-empty (verified mean); z13 overview; mid-Atlantic → transparent PNG
-  and `EMPTY_TILE_BG` JPEG; TileJSON bbox ≈ known footprint; GeoJSON ring closed;
+  and `EMPTY_TILE_BG` JPEG; **edge tile** `13/4064/2995` (straddles the rotated
+  footprint edge): no opaque pixel >2 tile-px outside the web bbox (the clamped
+  window bug painted 27 648 px of repeated edge column there); TileJSON bbox ≈ known footprint; GeoJSON ring closed;
   COG_BIG z17 → 200 with coverage (mask applied);
 - **remote byte-range**: counting relay proxy in front of COG_SMALL, z18 render →
   transferred < 1 % of file, no upstream request without `Range:`.
 
 Verified end-to-end (uvicorn + curl, post-optimisation): open (TileJSON) ≈ 0.07 s;
-first tile ≈ 0.1–0.15 s (any zoom); warm-block render ≈ 20 ms; cached tile ≈ 2 ms;
+first tile ≈ 0.1–0.2 s (any zoom); warm-block render ≈ 5–6 ms (was ≈20 ms
+before the `cv2.remap` warp, ≈50–80 ms before simplejpeg); cached tile ≈ 2 ms;
 COG_BIG z17 ≈ 0.13 s. Parity vs rio-tiler reference tiles: corr
 0.93–0.98, means within ~1 unit (differences = average vs bilinear resampling only).
 Coherence on data.cquest.org (nginx, sends ETag + honors If-Range): stale validator
@@ -224,6 +270,13 @@ stays ≈ 2 ms in between). Behind a 302 entry (fixture proof): first tile ≈ 0
 **one** hop for the whole render, cached tile ≈ 3.5 ms, entry moved to another server
 → new tile in ≈ 0.08 s (probe + reopen), never a 200 whole-file body, mirrors with
 different ETags serve 200 instead of the previous 503.
+
+Decoder swap measured live (two uvicorn instances, same COGs, one with simplejpeg
+hidden + `DECODE_THREADS=1`, cold tiles, alternating samples): cold renders
+Bayonne z18 81 → 65 ms (+20 %), z21 81 → 77 ms, Anglet z13 98 → 85 ms, Anglet z17
+90 → 77 ms (+15 %), z16/z19 within noise (decode is a small share); cached tiles
+unchanged ≈ 2 ms. Reproduction scripts: `/tmp/opencode/bench_ab.py` (in-process,
+decode stage) and `/tmp/opencode/live_ab.py` (two servers, cold tiles).
 
 ## Roadmap status
 
@@ -236,7 +289,12 @@ different ETags serve 200 instead of the previous 503.
 
 Possible follow-ups: WebP, average-area resampling option (`resampling=`), rescale
 percentile auto, host allowlist tests, BigTIFF overview masks on more samples, seam test
-across the 4 Bayonne COGs. Known open security gaps (documented, not implemented):
+across the 4 Bayonne COGs. Decoding: **imagecodecs** would add the other TIFF codecs
+(ZSTD/LERC/CCITT/JPEG-XL) and beat our pure-Python ones (PackBits 7.3 µs vs 133 µs,
+deflate 86 µs vs zlib 152 µs) but costs a ~30 MB wheel, and its LZW output is not
+decoded by our reader (`bad LZW code`) — variant mismatch to investigate first.
+`PNG_COMPRESS` retune (level 0: 6 ms vs 15 ms on random data, +13 % bytes) is the last
+non-dependency lever. Known open security gaps (documented, not implemented):
 **DNS rebinding / TOCTOU** (`check_url` resolves, then the connection resolves again —
 closing it needs pinning the validated IP, delicate for HTTPS certificate checks) and
 the `ipaddress.is_global` table being CPython-version dependent (multicast, NAT64

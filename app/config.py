@@ -36,6 +36,10 @@ MERGE_GAP = int(os.getenv("MERGE_GAP", "4096"))
 # decoded blocks kept in memory per open COG
 BLOCK_CACHE = int(os.getenv("BLOCK_CACHE", "1500"))
 
+# threads used to decode the blocks of a large window, when the decoder releases
+# the GIL (JPEG needs simplejpeg, Deflate uses zlib); 1 decodes everything inline
+DECODE_THREADS = int(os.getenv("DECODE_THREADS", "4"))
+
 # encoded tiles kept in memory (LRU, 0 disables); a tile is immutable per params
 TILE_CACHE = int(os.getenv("TILE_CACHE", "1024"))
 

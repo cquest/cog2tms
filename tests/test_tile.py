@@ -4,7 +4,7 @@ import io
 import numpy as np
 from PIL import Image
 
-from .conftest import BBOX4326, COG3857, COG4326, fixture_tile, tile_url
+from .conftest import BBOX4326, COG3857, COG4326, _web, fixture_tile, tile_url
 
 
 def test_healthz(client):
@@ -60,6 +60,36 @@ def test_out_of_bounds(client, server):
     r = client.get(tile_url(server, COG4326, z, x + 40, y, format="jpeg"))
     im = np.asarray(Image.open(io.BytesIO(r.content)))
     assert (im == np.array([0, 0, 0])).all()  # EMPTY_TILE_BG default
+
+
+def test_edge_tile_transparent(client, server):
+    """Tile straddling the east edge of the footprint: pixels outside the
+    footprint must be transparent, not smeared repeats of the edge column."""
+    from app.tiles import tile_web_bounds
+    z, xc, yc = fixture_tile()
+    x = xc + 1  # one tile east of centre: the footprint's east edge crosses it
+    e = _web(BBOX4326[2], 0.0)[0]  # fixture east edge in EPSG:3857 m
+    for cog in (COG4326, COG3857):
+        a = np.asarray(Image.open(io.BytesIO(
+            client.get(tile_url(server, cog, z, x, yc)).content)))
+        v = a[..., 3] > 0
+        assert 0.2 < v.mean() < 0.6, (cog, v.mean())
+        tx0, _, tx1, _ = tile_web_bounds(z, x, yc)
+        centers = tx0 + (tx1 - tx0) * (np.arange(256) + 0.5) / 256
+        beyond_2px = centers > e + 2 * (tx1 - tx0) / 256
+        assert not v[:, beyond_2px].any(), (cog, v[:, beyond_2px].sum())
+
+
+def test_sampler_outside_window_transparent():
+    """_sample must not clamp coordinates to the window: samples whose stencil
+    lies fully outside contribute nothing (transparent), not edge pixels."""
+    from app.tiles import _sample
+    data = np.full((4, 4, 3), 100, np.uint8)
+    valid = np.ones((4, 4), bool)
+    fx, fy = np.meshgrid(np.arange(-2.0, 6.0), np.arange(-2.0, 6.0))
+    rgb, v = _sample(data, valid, fx, fy)
+    assert (v == (fx >= 0) & (fx <= 3) & (fy >= 0) & (fy <= 3)).all()
+    assert (rgb[v] == 100).all() and not rgb[~v].any()
 
 
 def test_bad_requests(client, server):

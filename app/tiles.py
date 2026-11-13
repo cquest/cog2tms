@@ -1,9 +1,13 @@
 """Render EPSG:3857 XYZ tiles from a CogFile (any source CRS in the supported
 subset). Non-affine warps use a 17x17 control grid (inverse projection at grid
 nodes) interpolated bilinearly per pixel, then bilinear resampling of pixels."""
+import cv2
 import numpy as np
 
 from . import crs
+
+cv2.setNumThreads(1)  # 256 px warps: OpenCV's internal threading gains nothing and
+# would oversubscribe the cores between uvicorn workers
 
 TILE_EPS = 1e-6
 _K = 17
@@ -76,12 +80,12 @@ def render_tile(cog, z: int, x: int, y: int, size: int,
     level = _pick_level(cog, c1 - c0, size)
     lvl = cog.levels[level]
     scale = lvl0.width / lvl.width  # exact decimation factor of this overview
-    wc0 = max(int(np.floor(c0 / scale)) - 1, 0)
-    wr0 = max(int(np.floor(r0 / scale)) - 1, 0)
-    wc1 = min(int(np.ceil(c1 / scale)) + 1, lvl.width)
-    wr1 = min(int(np.ceil(r1 / scale)) + 1, lvl.height)
-    if wc0 >= wc1 or wr0 >= wr1:
-        raise EmptyTile()
+    # window past the raster on purpose: _window pads with valid=False, which keeps
+    # tiles straddling the COG edge transparent instead of smearing edge pixels
+    wc0 = int(np.floor(c0 / scale)) - 1
+    wr0 = int(np.floor(r0 / scale)) - 1
+    wc1 = int(np.ceil(c1 / scale)) + 1
+    wr1 = int(np.ceil(r1 / scale)) + 1
 
     data, valid = cog.window(level, wc0, wr0, wc1, wr1)
     if bidx:
@@ -136,26 +140,16 @@ def _warp_grid(cog, tx0, ty0, tx1, ty1, size, scale, wc0, wr0):
 
 
 def _sample(data, valid, fx, fy):
-    """Bilinear gather with mask-aware renormalization. Returns (uint8 rgb, valid).
-    float32 throughout: gathers of uint8 stay in 32-bit, half the memory traffic."""
-    H, W = data.shape[0], data.shape[1]
-    fx = np.clip(fx, 0, W - 1 - 1e-9).astype(np.float32, copy=False)
-    fy = np.clip(fy, 0, H - 1 - 1e-9).astype(np.float32, copy=False)
-    x0 = fx.astype(np.intp)
-    y0 = fy.astype(np.intp)
-    x1 = np.minimum(x0 + 1, W - 1)
-    y1 = np.minimum(y0 + 1, H - 1)
-    wx2, wy2 = fx - x0, fy - y0
-    wx, wy = wx2[..., None], wy2[..., None]
-    a00 = (1 - wx) * (1 - wy)
-    a01 = wx * (1 - wy)
-    a10 = (1 - wx) * wy
-    a11 = wx * wy
-    w = valid.astype(np.float32)
-
-    a = (data[y0, x0] * a00 + data[y0, x1] * a01
-         + data[y1, x0] * a10 + data[y1, x1] * a11)
-    wv = (w[y0, x0] * a00[..., 0] + w[y0, x1] * a01[..., 0]
-          + w[y1, x0] * a10[..., 0] + w[y1, x1] * a11[..., 0])
-    out = np.where(wv[..., None] > 1e-6, a / np.maximum(wv, 1e-6)[..., None], 0)
-    return np.clip(out, 0, 255).astype(np.uint8), wv >= 0.5
+    """cv2.remap bilinear warp with mask-aware renormalization: data*valid and
+    valid are remapped as float32, so out-of-window pixels contribute 0 to both
+    (constant border) and the division restores valid pixels exactly, leaving 0
+    under invalid ones. Returns (uint8 rgb, valid)."""
+    mapx = np.ascontiguousarray(fx, np.float32)
+    mapy = np.ascontiguousarray(fy, np.float32)
+    a = cv2.remap((data * valid[..., None]).astype(np.float32), mapx, mapy,
+                  cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+    wv = cv2.remap(valid.astype(np.float32), mapx, mapy,
+                   cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+    a /= np.maximum(wv, TILE_EPS)[..., None]
+    np.clip(a, 0, 255, out=a)
+    return a.astype(np.uint8), wv >= 0.5

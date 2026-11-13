@@ -1,6 +1,7 @@
 """Offline fixtures: small COGs written by a pure-python TIFF writer, served
 over a local Range-capable HTTP server that counts transferred bytes."""
 import http.server
+import io
 import os
 import socketserver
 import struct
@@ -10,6 +11,7 @@ from functools import lru_cache
 
 import numpy as np
 import pytest
+from PIL import Image
 
 os.environ["ALLOW_PRIVATE_NET"] = "1"  # fixture server is on loopback
 
@@ -37,23 +39,32 @@ def pattern(half=False):
     return a
 
 
-def _tiles(arr):
+def _tiles(arr, comp=8):
     th = tw = TILE
     h, w = arr.shape[:2]
     blobs = []
     for tj in range(h // th):
         for ti in range(w // tw):
-            blob = np.ascontiguousarray(arr[tj * th:(tj + 1) * th,
-                                           ti * tw:(ti + 1) * tw]).tobytes()
-            blobs.append(zlib.compress(blob))
+            blk = arr[tj * th:(tj + 1) * th, ti * tw:(ti + 1) * tw]
+            if comp == 7:  # every block keeps its own JPEG tables (no JPEGTables tag)
+                img = Image.fromarray(blk) if blk.ndim == 3 else Image.fromarray(blk, "L")
+                buf = io.BytesIO()
+                img.save(buf, "JPEG", quality=90)
+                blobs.append(buf.getvalue())
+            else:
+                blobs.append(zlib.compress(np.ascontiguousarray(blk).tobytes()))
     return blobs
 
 
-def write_cog(path, ox, oy, psx, psy, geographic):
+def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3):
     """Classic tiled little-endian TIFF with a 2x internal overview.
     Layout: header | level-0 tiles | level-1 tiles | value areas | IFD0 | IFD1."""
-    lvls = [(pattern(), 0), (pattern(half=True), 1)]
-    blobs = [_tiles(arr) for arr, _ in lvls]
+    src = pattern() if samples == 3 else pattern()[..., 0]
+    src_h = pattern(half=True) if samples == 3 else pattern(half=True)[..., 0]
+    lvls = [(src, 0), (src_h, 1)]
+    blobs = [_tiles(arr, comp) for arr, _ in lvls]
+    phot = 6 if (comp == 7 and samples == 3) else (1 if samples == 1 else 2)
+    bps_len = 2 * samples if samples > 1 else 0  # a lone SHORT fits inline in the IFD
 
     # rough layout: header | tiles | areas | ifds ; areas are small so offsets
     # are computed exactly in a second pass
@@ -69,7 +80,7 @@ def write_cog(path, ox, oy, psx, psy, geographic):
     def areas_for(w, h, sub):
         nt = (w // TILE) * (h // TILE)
         a = bytearray()
-        a.extend(b"\x08\x00" * 3)                       # BitsPerSample
+        a.extend(b"\x08\x00" * (bps_len // 2))          # BitsPerSample (if out of line)
         a.extend(struct.pack("<" + "I" * nt, *([0] * nt)))   # TileOffsets (patched)
         a.extend(struct.pack("<" + "I" * nt, *[len(b) for b in blobs[0 if sub == 0 else 1]]))
         a.extend(struct.pack("<3d", psx, psy, 0.0))
@@ -93,9 +104,10 @@ def write_cog(path, ox, oy, psx, psy, geographic):
             (254, 4, 1, struct.pack("<I", sub)[:4]),
             (256, 4, 1, struct.pack("<I", w)[:4]),
             (257, 4, 1, struct.pack("<I", h)[:4]),
-            (258, 3, 3, None), (259, 3, 1, struct.pack("<H", 8)[:4]),
-            (262, 3, 1, struct.pack("<H", 2)[:4]),
-            (277, 3, 1, struct.pack("<H", 3)[:4]),
+            (258, 3, samples, None if bps_len else struct.pack("<H", 8)[:4]),
+            (259, 3, 1, struct.pack("<H", comp)[:4]),
+            (262, 3, 1, struct.pack("<H", phot)[:4]),
+            (277, 3, 1, struct.pack("<H", samples)[:4]),
             (284, 3, 1, struct.pack("<H", 1)[:4]),
             (322, 3, 1, struct.pack("<H", TILE)[:4]),
             (323, 3, 1, struct.pack("<H", TILE)[:4]),
@@ -103,10 +115,10 @@ def write_cog(path, ox, oy, psx, psy, geographic):
             (33550, 12, 3, None), (33922, 12, 6, None),
             (34735, 3, len(geokeys), None),
         ]
-        # value-area offsets within area_blobs[i]: bps(6) | offs(4nt) | cnts(4nt) | scale(24) | tie(48) | keys(2*len)
+        # area layout: bps (0 if inline) | offs | cnts | scale | tiepoint | geokeys
         p = base_area
         pos = {}
-        for code, size in ((258, 6), (324, 4 * nt), (325, 4 * nt),
+        for code, size in ((258, bps_len), (324, 4 * nt), (325, 4 * nt),
                            (33550, 24), (33922, 48), (34735, 2 * len(geokeys))):
             pos[code] = p
             p += size
@@ -130,7 +142,7 @@ def write_cog(path, ox, oy, psx, psy, geographic):
         ab = bytearray(area_blobs[i])
         w = lvls[i][0].shape[1]
         nt = nts[i]
-        offs_pos = 6  # after BitsPerSample
+        offs_pos = bps_len  # after BitsPerSample
         for j, b in enumerate(lv):
             ab[offs_pos + 4 * j: offs_pos + 4 * j + 4] = struct.pack("<I", cur)
             cur += len(b)
@@ -224,6 +236,10 @@ def fixtures_dir(tmp_path_factory):
     x0, y1 = _web(w0, n0)
     x1, y0 = _web(e0, s0)
     write_cog(d / "cog3857.tif", x0, y1, (x1 - x0) / W, (y1 - y0) / H, geographic=False)
+    write_cog(d / "cogjpeg.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, comp=7)
+    write_cog(d / "cogjpeg1.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, comp=7, samples=1)
     return d
 
 
@@ -257,6 +273,8 @@ def client(fixtures_dir):
 
 COG4326 = "cog4326.tif"
 COG3857 = "cog3857.tif"
+COGJPEG = "cogjpeg.tif"  # same content, JPEG-in-TIFF blocks (compression 7)
+COGJPEG1 = "cogjpeg1.tif"  # same, single-band JPEG blocks
 
 TILE_ZOOM = 14  # one tile covers the whole 4 km fixture footprint
 

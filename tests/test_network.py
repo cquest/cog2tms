@@ -40,6 +40,31 @@ def test_out_of_bounds(client):
     assert (np.asarray(Image.open(io.BytesIO(r.content))) == 0).all()
 
 
+def test_edge_tile_transparent(client):
+    """z13 tile 4064/2995 straddles the east edge of the (rotated) footprint:
+    no pixel more than 2 tile-px outside the web bbox may be opaque — the old
+    bug painted whole columns with repeats of the footprint edge column."""
+    from app.crs import WEBMERCATOR
+    from app.tiles import tile_web_bounds
+    a = np.asarray(Image.open(io.BytesIO(
+        _t(client, f"/c2t/13/4064/2995?u={COG_SMALL}").content)))
+    v = a[..., 3] > 0
+    assert v.sum() > 20000  # most of the footprint half still renders
+    w, s, e, n = _t(client, f"/c2t.tms.json?u={COG_SMALL}").json()["bbox"]
+    bx0, by0 = WEBMERCATOR.to_xy(w, s)
+    bx1, by1 = WEBMERCATOR.to_xy(e, n)
+    tx0, ty0, tx1, ty1 = tile_web_bounds(13, 4064, 2995)
+    cell = (tx1 - tx0) / 256
+    u = (np.arange(256) + 0.5) / 256
+    dx = np.maximum.reduce([bx0 - (tx0 + (tx1 - tx0) * u),
+                            (tx0 + (tx1 - tx0) * u) - bx1,
+                            np.zeros(256)])[None, :]
+    dy = np.maximum.reduce([by0 - (ty1 + (ty0 - ty1) * u),
+                            (ty1 + (ty0 - ty1) * u) - by1,
+                            np.zeros(256)])[:, None]
+    assert not (v & ((dx > 2 * cell) | (dy > 2 * cell))).any()
+
+
 def test_tilejson(client):
     tj = _t(client, f"/c2t.tms.json?u={COG_SMALL}").json()
     w, s, e, n = tj["bbox"]

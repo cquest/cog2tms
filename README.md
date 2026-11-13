@@ -9,9 +9,11 @@ COG uses (e.g. Lambert conformal conic French zones, UTM, WGS84).
 
 The COG is parsed by a small pure-Python TIFF reader
 (`app/geotiff.py`), accessed with `requests` + `Range:` headers, and pixels are
-resampled with numpy/Pillow. Supported: classic TIFF and BigTIFF, tiled layout,
+warped/resampled by `cv2.remap` (opencv-python-headless) with numpy/Pillow for
+the rest. Supported: classic TIFF and BigTIFF, tiled layout,
 internal overviews, compressions None/Deflate/LZW/PackBits/JPEG (JPEG-in-TIFF
-with JPEGTables splicing), 1-bit internal alpha masks, GeoTIFF tags, and a
+with JPEGTables splicing, decoded by simplejpeg — 3× faster than Pillow, same
+pixels — with a Pillow fallback), 1-bit internal alpha masks, GeoTIFF tags, and a
 subset of CRSs (EPSG:4326, 3857, Lambert-93, Lambert CC42–CC46, UTM N/S zones,
 plus user-defined LCC/TM projections); other CRSs return `400`.
 
@@ -80,7 +82,7 @@ Measured on the Bayonne COG (875 MB, EPSG:3943) from a workstation:
 | open COG (TIFF/GeoTIFF headers) | 0.39 s, 105 req, 8.4 MB | **0.05 s, 1 req, 64 KB** |
 | first tile, fresh process (open + render) | 0.88 s | ≈0.15–0.3 s |
 | first tile at max zoom (L0 block index) | ≈ +0.5 s, 6.3 MB of metadata | no extra cost |
-| warm render (blocks cached) | ≈50–80 ms | ≈20 ms |
+| warm render (blocks cached) | ≈50–80 ms | ≈6 ms |
 | repeat of the same tile (tile cache) | — | ≈2 ms |
 
 What got it there: a single bulk prefetch of the COG head zone absorbs all
@@ -89,11 +91,32 @@ EOF get one chunk around the IFD pointer instead); `TileOffsets`/`TileByteCounts
 are never read wholesale — small arrays load once per level, huge ones (the L0
 index of a big COG is ~6 MB for ~800 k blocks) are fetched as a few-hundred-byte
 slice per window; one batched + parallel `read_many` per IFD and per window;
-float32 bilinear sampling; parallel range fetches; multi-range GETs
+parallel range fetches; multi-range GETs
 (`multipart/byteranges`, with automatic single-range fallback for servers like
 S3 that answer 200 + the whole object); PNG `compress_level=1`;
 and an in-process LRU tile cache with single-flight locks (identical concurrent
 requests render once).
+
+Warp and resampling was the dominant CPU step (≈16–18 ms of a ≈20 ms warm
+render): the bilinear gather is now `cv2.remap` (opencv-python-headless, the one
+heavy dependency — 61 MB wheel, but the headless wheels need no system
+libraries) with the mask carried as a second channel — data and validity are
+remapped premultiplied and renormalized, so out-of-window and out-of-footprint
+samples contribute nothing and edge tiles stay transparent instead of smearing
+the footprint's last row/column. **16–18 ms → 1.4–2 ms per tile**, pixels
+identical to the numpy sampler within 1 level; `cv2.remap` releases the GIL and
+is pinned to one internal thread (`cv2.setNumThreads(1)`) so it doesn't
+oversubscribe across uvicorn workers.
+
+Block decompression (a few % of a render, since overviews keep the number of
+blocks per tile small): JPEG-in-TIFF blocks are decoded by `simplejpeg` at
+**74 µs per 128×128 block instead of 210 µs with Pillow**, with identical pixels
+(the `JPEGTables` splice is unchanged); simplejpeg also releases the GIL, which
+Pillow does not, so the blocks of a large window (≥ 1 Mpx of source blocks, e.g.
+512px-tiled COGs) are decoded in `DECODE_THREADS` threads — 13.4 ms → 5.6 ms for
+the 8 blocks of an Anglet z19 tile, and cold renders gain 0–20% depending on how
+much work a tile is. Pillow-only installs (no wheel for the platform) simply keep
+decoding inline.
 
 ## Configuration (environment variables)
 
@@ -104,6 +127,7 @@ requests render once).
 | `POOL_SIZE` | `64` | max number of concurrently opened COGs |
 | `MAX_CONCURRENT_READS` | `8` | max simultaneous tile renders |
 | `BLOCK_CACHE` | `1500` | decoded COG blocks kept per open COG |
+| `DECODE_THREADS` | `4` | threads decoding the blocks of a large window (`1` decodes inline; JPEG needs simplejpeg) |
 | `TILE_CACHE` | `1024` | encoded tiles kept in memory, LRU (`0` disables) |
 | `PNG_COMPRESS` | `1` | PNG deflate level (1 is ~4× faster than 6, ~13% bigger) |
 | `MERGE_GAP` | `4096` | byte-ranges closer than this share one HTTP request |
