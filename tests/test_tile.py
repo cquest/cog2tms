@@ -1,0 +1,126 @@
+"""Offline unit tests: fixture COGs served locally over HTTP byte-range."""
+import io
+
+import numpy as np
+from PIL import Image
+
+from .conftest import BBOX4326, COG3857, COG4326, fixture_tile, tile_url
+
+
+def test_healthz(client):
+    assert client.get("/healthz").json() == {"status": "ok"}
+
+
+def test_upstream_user_agent():
+    """Upstream COG servers must see "cog2tms/<version>" (a contact URL may
+    follow), not python-requests."""
+    from app import __version__
+    from app.httprange import USER_AGENT, RangeReader
+    assert USER_AGENT.startswith(f"cog2tms/{__version__}")
+    r = RangeReader("https://invalid.invalid/x.tif")
+    assert r._s.headers["User-Agent"] == USER_AGENT
+
+
+def test_center_tile_png(client, server):
+    z, x, y = fixture_tile()
+    r = client.get(tile_url(server, COG4326, z, x, y))
+    assert r.status_code == 200 and r.headers["content-type"] == "image/png"
+    im = Image.open(io.BytesIO(r.content))
+    assert im.size == (256, 256)
+    a = np.asarray(im)
+    assert (a[..., 3] > 0).all()  # centre tile fully covered by the footprint
+
+
+def test_xyz_convention(client, server):
+    """OSM/XYZ: north up, no flip. The red square sits in the northern half of
+    the fixture raster, so it must appear in the upper half of the tile."""
+    z, x, y = fixture_tile()
+    r = client.get(tile_url(server, COG4326, z, x, y))
+    a = np.asarray(Image.open(io.BytesIO(r.content)))
+    red = (a[..., 0] > 200) & (a[..., 1] < 60) & (a[..., 2] < 60)
+    ys = np.nonzero(red.any(axis=1))[0]
+    assert len(ys) > 10 and ys.mean() < 128  # red square above the tile mid-line
+
+
+def test_jpeg(client, server):
+    z, x, y = fixture_tile()
+    r = client.get(tile_url(server, COG4326, z, x, y, format="jpeg", quality=60))
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+    im = Image.open(io.BytesIO(r.content))
+    assert im.size == (256, 256) and im.mode == "RGB"
+
+
+def test_out_of_bounds(client, server):
+    """Tile far from the footprint: transparent PNG, solid JPEG."""
+    z, x, y = fixture_tile()
+    r = client.get(tile_url(server, COG4326, z, x + 40, y))
+    assert r.status_code == 200
+    a = np.asarray(Image.open(io.BytesIO(r.content)))
+    assert a.shape == (256, 256, 4) and a[..., 3].max() == 0
+    r = client.get(tile_url(server, COG4326, z, x + 40, y, format="jpeg"))
+    im = np.asarray(Image.open(io.BytesIO(r.content)))
+    assert (im == np.array([0, 0, 0])).all()  # EMPTY_TILE_BG default
+
+
+def test_bad_requests(client, server):
+    z, x, y = fixture_tile()
+    u = f"{server.base}/{COG4326}"
+    cases = [
+        ("/c2t/30/1/1", {"u": u}),                     # zoom > MAX_ZOOM
+        (f"/c2t/{z}/99999/{y}", {"u": u}),             # x outside matrix
+        (f"/c2t/{z}/{x}/-1", {"u": u}),                # negative y
+        (f"/c2t/{z}/{x}/{y}", {"u": u, "format": "tiff"}),
+        (f"/c2t/{z}/{x}/{y}", {"u": "ftp://example.com/x.tif"}),
+        (f"/c2t/{z}/{x}/{y}", {"u": f"{server.base}/missing.tif"}),  # 404 upstream
+        (f"/c2t/{z}/{x}/{y}", {"u": u, "bidx": "0"}),
+        (f"/c2t/{z}/{x}/{y}", {"u": u, "rescale": "9,1"}),
+    ]
+    for path, q in cases:
+        r = client.get(path, params=q)
+        want = 404 if "missing" in str(q.get("u")) else 400
+        assert r.status_code == want, (path, q, r.status_code)
+
+
+def test_reprojection_parity(client, server):
+    """Same footprint, two source CRSs (4326 vs hand-reprojected 3857 box) ->
+    the rendered tiles must match closely."""
+    z, x, y = fixture_tile()
+    a = np.asarray(Image.open(io.BytesIO(
+        client.get(tile_url(server, COG4326, z, x, y)).content)))[..., :3]
+    b = np.asarray(Image.open(io.BytesIO(
+        client.get(tile_url(server, COG3857, z, x, y)).content)))[..., :3]
+    mse = ((a.astype(np.float64) - b) ** 2).mean()
+    assert mse < 100, mse
+
+
+def test_tms_json(client, server):
+    r = client.get(f"/c2t.tms.json?u={server.base}/{COG4326}")
+    assert r.status_code == 200
+    tj = r.json()
+    assert tj["scheme"] == "xyz" and tj["minzoom"] <= tj["maxzoom"]
+    w, s, e, n = BBOX4326
+    assert abs(tj["bbox"][0] - w) < 0.01 and abs(tj["bbox"][2] - e) < 0.01
+
+
+def test_geojson(client, server):
+    z, x, y = fixture_tile()
+    r = client.get(f"/c2t/{z}/{x}/{y}.geojson?u={server.base}/{COG4326}")
+    assert r.status_code == 200
+    ring = r.json()["geometry"]["coordinates"][0]
+    assert ring[0] == ring[-1] and len(ring) > 80
+
+
+def test_size_and_bidx(client, server):
+    z, x, y = fixture_tile()
+    r = client.get(tile_url(server, COG4326, z, x, y, size=100))
+    assert Image.open(io.BytesIO(r.content)).size == (100, 100)
+    r = client.get(tile_url(server, COG4326, z, x, y, bidx="1,1,1"))
+    a = np.asarray(Image.open(io.BytesIO(r.content)))
+    v = a[..., 3] > 0
+    assert (a[..., 0][v] == a[..., 1][v]).all() and (a[..., 1][v] == a[..., 2][v]).all()
+
+
+def test_cog_local_not_accepted(client, tmp_path):
+    """The public API only accepts http(s), never local paths."""
+    r = client.get("/c2t/1/0/0", params={"u": "/etc/hostname"})
+    assert r.status_code == 400

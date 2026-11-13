@@ -1,0 +1,29 @@
+[project]
+name = "cog2tms"
+description = "Serve TMS tiles (EPSG:3857) from a remote COG read over HTTP byte-range"
+dynamic = ["version"]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "requests>=2.31",
+    "pillow>=10",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx"]
+
+[tool.pytest.ini_options]
+addopts = "-m 'not network'"
+markers = ["network: integration tests on remote COGs"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "app/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
