@@ -18,6 +18,12 @@ def _t(client, path):
     return client.get(path)
 
 
+def test_web_ui(client):
+    assert _t(client, "/").status_code == 200
+    assert _t(client, "/maplibre").status_code == 200  # redirect, followed
+    assert _t(client, "/static/maplibre_app.js").status_code == 200
+
+
 def test_native_tile(client):
     r = _t(client, f"/c2t/18/130034/95856?u={COG_SMALL}")
     assert r.status_code == 200

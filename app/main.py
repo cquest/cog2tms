@@ -2,12 +2,14 @@ import asyncio
 import math
 from collections import OrderedDict
 from io import BytesIO
+from pathlib import Path
 
 import numpy as np
 import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, FileResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 from . import config, crs
@@ -24,6 +26,9 @@ from .tiles import EmptyTile, MissingRescale, web_bbox_lonlat
 app = FastAPI(title="cog2tms", version=version)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"])
 pool = ReaderPool(config.POOL_SIZE, config.READER_TTL, config.MAX_CONCURRENT_READS)
+
+_STATIC = Path(__file__).parent / "static"  # web UI: maplibre.html + vendored maplibre-gl
+app.mount("/static", StaticFiles(directory=_STATIC), name="static")
 
 MIME = {"png": "image/png", "jpeg": "image/jpeg"}
 CACHE = {"Cache-Control": "public, max-age=86400"}
@@ -227,6 +232,16 @@ async def tilejson(u: str = Query(...)):
         "minzoom": max(0, min(config.MAX_ZOOM, math.floor(math.log2(res0 / max(coarse_gsd, 1e-9))))),
         "maxzoom": max(0, min(config.MAX_ZOOM, math.ceil(math.log2(res0 / gsd)))),
     })
+
+
+@app.get("/")
+async def index():
+    return FileResponse(_STATIC / "maplibre.html", media_type="text/html")
+
+
+@app.get("/maplibre")
+async def maplibre():
+    return RedirectResponse("/")
 
 
 @app.get("/healthz")

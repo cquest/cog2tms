@@ -11,6 +11,17 @@ def test_healthz(client):
     assert client.get("/healthz").json() == {"status": "ok"}
 
 
+def test_web_ui(client):
+    r = client.get("/")
+    assert r.status_code == 200 and r.headers["content-type"] == "text/html; charset=utf-8"
+    assert b"maplibre" in r.content and b"cog2tms" in r.content
+    for asset in ("/static/maplibre-gl.js", "/static/maplibre-gl.css", "/static/maplibre_app.js"):
+        assert client.get(asset).status_code == 200
+    assert client.get("/static/nope.js").status_code == 404
+    r = client.get("/maplibre", follow_redirects=False)  # old url kept
+    assert r.status_code in (301, 302, 307) and r.headers["location"] == "/"
+
+
 def test_upstream_user_agent():
     """Upstream COG servers must see "cog2tms/<version>" (a contact URL may
     follow), not python-requests."""

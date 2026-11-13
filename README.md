@@ -7,19 +7,19 @@ Give it the URL of a COG, it reads the file remotely over HTTP byte-range reques
 XYZ (OSM scheme) tiles reprojected to EPSG:3857 (Web Mercator) — whatever CRS the
 COG uses (e.g. Lambert conformal conic French zones, UTM, WGS84).
 
-The COG is parsed by a small pure-Python TIFF reader
-(`app/geotiff.py`), accessed with `requests` + `Range:` headers, and pixels are
-warped/resampled by `cv2.remap` (opencv-python-headless) with numpy/Pillow for
-the rest. Supported: classic TIFF and BigTIFF, tiled layout,
-internal overviews, compressions None/Deflate/LZW/PackBits/JPEG (JPEG-in-TIFF
-with JPEGTables splicing, decoded by simplejpeg — 3× faster than Pillow, same
-pixels — with a Pillow fallback), 1-bit internal alpha masks, GeoTIFF tags, and a
-subset of CRSs (EPSG:4326, 3857, Lambert-93, Lambert CC42–CC46, UTM N/S zones,
-plus user-defined LCC/TM projections); other CRSs return `400`.
+The COG is parsed by a small pure-Python TIFF reader (`app/geotiff.py`), fetched
+with `requests` + `Range:` headers, and pixels are warped/resampled by `cv2.remap`
+(opencv-python-headless, the only heavy dependency). Supported: classic TIFF and
+BigTIFF, tiled layout, internal overviews, compressions None/Deflate/LZW/PackBits/
+JPEG (JPEG-in-TIFF decoded by simplejpeg, Pillow fallback), 1-bit internal alpha
+masks, GeoTIFF tags, and a subset of CRSs (EPSG:4326, 3857, Lambert-93, Lambert
+CC42–CC46, UTM N/S, plus user-defined LCC/TM); other CRSs return `400`.
 
 ## API
 
 ```
+GET /                                        # web UI (form + MapLibre preview, vector basemap)
+GET /static/…                                # web UI assets (vendored MapLibre, maplibre_app.js)
 GET /c2t/{z}/{x}/{y}?u=<COG url>[&format=png|jpeg][&quality=80][&size=256]
                       [&bidx=1,2,3][&rescale=min,max][&blackmax=0]
 GET /c2t/{z}/{x}/{y}.geojson?u=<COG url>   # COG footprint (debug)
@@ -30,13 +30,12 @@ GET /healthz
 - Tile scheme: XYZ (OSM/Leaflet numbering, y-down), output PNG (RGBA, alpha 0
   outside coverage) or JPEG (`quality`, solid `EMPTY_TILE_BG` outside coverage).
 - `blackmax=0..255`: pixels whose brightest band is ≤ this value (near-black,
-  typically the unmasked fringes at orthophoto edges) are treated as
-  no-coverage — transparent PNG / `EMPTY_TILE_BG` JPEG. Default `20` (env
-  `BLACKMAX`); `blackmax=-1` returns every pixel as rendered.
+  typically the unmasked fringes at orthophoto edges) are treated as no-coverage.
+  Default `20` (env `BLACKMAX`); `-1` returns every pixel as rendered.
 - Tiles outside the COG footprint return `200` with an empty (transparent) tile.
 - `400` bad zoom / tile index / format / size / URL (also 16-bit data without
-  `rescale`, unsupported CRS, redirect chain refused because its `Location` is
-  not allowed); `404` COG unreachable or not a GeoTIFF; `502` upstream error.
+  `rescale`, unsupported CRS, refused redirect chain); `404` COG unreachable or
+  not a GeoTIFF; `502` upstream error.
 
 ## Run locally
 
@@ -48,23 +47,26 @@ pip install -e ".[dev]"
 uvicorn app.main:app --reload --port 3857
 ```
 
-Fetch a tile (example COGs are public drone orthophotos from the French coast,
-in EPSG:3943 Lambert CC43):
+Fetch a tile (the example COG is a public drone orthophoto, EPSG:3943):
 
 ```bash
 curl -o tile.png \
   "http://127.0.0.1:3857/c2t/18/130034/95856?u=https://data.cquest.org/temp/cog4josm/COG_BayonneSudEst.tif"
 ```
 
-Use it in JOSM (Preferences → Map paint settings → WMS/TMS sources → New WMS/TMS
-source, type `TMS`) with this URL:
+In JOSM (Preferences → Map paint settings → WMS/TMS sources → New WMS/TMS source,
+type `TMS`), add:
 
 ```
 tms:http://127.0.0.1:3857/c2t/{zoom}/{x}/{y}?u=https://data.cquest.org/temp/cog4josm/COG_BayonneSudEst.tif
 ```
 
-(JOSM's `{y}` placeholder uses the same top-down numbering as this service, so
-no flip is needed; `{-y}` would be required only for true TMS y-up servers.)
+(JOSM's `{y}` is already top-down like this service — no `{-y}` flip needed.)
+
+## Web UI
+
+Open `http://127.0.0.1:3857/` in a browser: paste a COG URL and the page shows
+a preview map and ready-to-paste URLs.
 
 ## Tests
 
@@ -73,54 +75,22 @@ pytest              # offline: fixture COGs written in-process and served locall
 pytest -m network   # integration on the public cog4josm COGs
 ```
 
-The offline suite proves with a counting HTTP server that a render transfers
-only a fraction of the file and that every upstream request carries a `Range:`
-header; the network suite repeats this against the 875 MB COG (< 1 % transferred).
-
-## Performance notes
+## Performance
 
 Measured on the Bayonne COG (875 MB, EPSG:3943) from a workstation:
 
-| Operation | Before | After |
-|---|---|---|
-| open COG (TIFF/GeoTIFF headers) | 0.39 s, 105 req, 8.4 MB | **0.05 s, 1 req, 64 KB** |
-| first tile, fresh process (open + render) | 0.88 s | ≈0.15–0.3 s |
-| first tile at max zoom (L0 block index) | ≈ +0.5 s, 6.3 MB of metadata | no extra cost |
-| warm render (blocks cached) | ≈50–80 ms | ≈6 ms |
-| repeat of the same tile (tile cache) | — | ≈2 ms |
+| Operation | Measured |
+|---|---|
+| open COG (TIFF/GeoTIFF headers) | 0.05 s, 1 req, 64 KB |
+| first tile, fresh process (open + render) | ≈0.15–0.3 s |
+| first tile at max zoom (L0 block index) | no extra cost |
+| warm render (blocks cached) | ≈6 ms |
+| repeat of the same tile (tile cache) | ≈2 ms |
 
-What got it there: a single bulk prefetch of the COG head zone absorbs all
-IFD/tag parsing (COGs pack metadata near the head; classic TIFFs with IFDs at
-EOF get one chunk around the IFD pointer instead); `TileOffsets`/`TileByteCounts`
-are never read wholesale — small arrays load once per level, huge ones (the L0
-index of a big COG is ~6 MB for ~800 k blocks) are fetched as a few-hundred-byte
-slice per window; one batched + parallel `read_many` per IFD and per window;
-parallel range fetches; multi-range GETs
-(`multipart/byteranges`, with automatic single-range fallback for servers like
-S3 that answer 200 + the whole object); PNG `compress_level=1`;
-and an in-process LRU tile cache with single-flight locks (identical concurrent
-requests render once).
-
-Warp and resampling was the dominant CPU step (≈16–18 ms of a ≈20 ms warm
-render): the bilinear gather is now `cv2.remap` (opencv-python-headless, the one
-heavy dependency — 61 MB wheel, but the headless wheels need no system
-libraries) with the mask carried as a second channel — data and validity are
-remapped premultiplied and renormalized, so out-of-window and out-of-footprint
-samples contribute nothing and edge tiles stay transparent instead of smearing
-the footprint's last row/column. **16–18 ms → 1.4–2 ms per tile**, pixels
-identical to the numpy sampler within 1 level; `cv2.remap` releases the GIL and
-is pinned to one internal thread (`cv2.setNumThreads(1)`) so it doesn't
-oversubscribe across uvicorn workers.
-
-Block decompression (a few % of a render, since overviews keep the number of
-blocks per tile small): JPEG-in-TIFF blocks are decoded by `simplejpeg` at
-**74 µs per 128×128 block instead of 210 µs with Pillow**, with identical pixels
-(the `JPEGTables` splice is unchanged); simplejpeg also releases the GIL, which
-Pillow does not, so the blocks of a large window (≥ 1 Mpx of source blocks, e.g.
-512px-tiled COGs) are decoded in `DECODE_THREADS` threads — 13.4 ms → 5.6 ms for
-the 8 blocks of an Anglet z19 tile, and cold renders gain 0–20% depending on how
-much work a tile is. Pillow-only installs (no wheel for the platform) simply keep
-decoding inline.
+The levers behind those numbers (bulk head prefetch, lazy block indexes,
+batched/parallel and multi-range fetches, `cv2.remap` warp, threaded simplejpeg
+block decode, LRU tile cache with single-flight locks) are detailed in
+[AGENTS.md](AGENTS.md).
 
 ## Configuration (environment variables)
 
@@ -147,37 +117,19 @@ decoding inline.
 | `BLACKMAX` | `20` | default near-black transparency threshold (`-1` disables; per-request `&blackmax=`) |
 | `ALLOWED_HOSTS` | — | if set, comma-separated COG host allowlist |
 
-Security: only `http(s)` COG URLs are accepted, targets resolving to private or
-reserved IPs are rejected (anti-SSRF). Set `ALLOW_PRIVATE_NET=1` for tests/dev.
+Security, redirects, resilience and cache-coherence behavior in one line each
+(full mechanics in [AGENTS.md](AGENTS.md)):
 
-Redirects: `MAX_REDIRECTS` 30x hops are followed for the COG URL, and every
-`Location` is re-validated with the same rules (scheme, private IPs,
-`ALLOWED_HOSTS`) before we connect to it — an upstream server cannot point the
-service at an internal host. The chain is walked once per open COG, not per
-range read; a refused or looping chain is a `400`, the refused host is never
-contacted.
-
-Resilience: upstream GETs are retried transparently on 429/5xx (bounded, with
-exponential backoff; `Retry-After` honored); a remote 404/403 is remembered per
-COG URL for `NEGATIVE_TTL` so gone/forbidden files are not re-fetched on every
-tile request; already-cached tiles keep being served while upstream is down.
-
-Coherence (COG replaced under the same URL): the `ETag`/`Last-Modified` and the
-total size of each remote COG are remembered, and every later `Range` request
-carries `If-Range`. A server whose validator no longer matches answers 200 +
-the whole file — detected immediately, body never read (a 3.8 GB file is never
-downloaded). Cached tiles are also revalidated with one 1-byte `If-Range` GET at
-most every `VALIDATE_TTL` seconds. On any drift (ETag change, `If-Range`
-mismatch, size change) the reader, its decoded blocks and all cached tiles of
-that URL are dropped and the tile is rendered again on the new version — in
-about the time of a first tile render. A COG served behind a redirect keeps the
-same guarantees except for one case: our own validators are not exchanged with
-the target host (mirrors answering different `ETag`s for the same file would
-otherwise look like a replacement forever), so replacement in place is tracked
-by size only, while the version check re-walks the redirect chain and catches a
-COG that moved to another server. Note that downstream caches (browser,
-CDN) keep tiles for the `max-age` advertised below; lower it if your COGs are
-updated in place.
+- **Anti-SSRF**: only `http(s)` COG URLs; targets resolving to private or reserved
+  IPs are rejected (dev/tests: `ALLOW_PRIVATE_NET=1`). Every `Location` of a 30x
+  chain is re-validated with the same rules before connecting.
+- **Resilience**: 429/5xx retried transparently (bounded, `Retry-After` honored);
+  a remote 404/403 remembered per URL for `NEGATIVE_TTL`; already-cached tiles
+  keep being served while upstream is down.
+- **Coherence**: the `ETag`/`Last-Modified`/size of each COG are remembered and
+  later requests carry `If-Range`; any drift drops the reader and all cached
+  tiles of that URL and the tile re-renders on the new version — a replacement's
+  whole-file 200 answer is never downloaded.
 
 ## Docker
 
