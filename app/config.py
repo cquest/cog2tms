@@ -50,6 +50,11 @@ PNG_COMPRESS = int(os.getenv("PNG_COMPRESS", "1"))
 # per reader when a server rejects or ignores it (e.g. S3, nginx)
 MULTIRANGE = os.getenv("MULTIRANGE", "1") == "1"
 
+# pixels whose brightest band is <= this are treated as no-coverage (near-black
+# fringes of unmasked orthophotos); -1 disables, overridable per request with
+# &blackmax=
+BLACKMAX = int(os.getenv("BLACKMAX", "20"))
+
 # bulk read of the COG head zone (IFDs, GeoTIFF tags) to avoid many tiny
 # round-trips at open; 0 disables
 HEAD_PREFETCH = int(os.getenv("HEAD_PREFETCH", "65536"))

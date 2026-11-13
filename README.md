@@ -21,7 +21,7 @@ plus user-defined LCC/TM projections); other CRSs return `400`.
 
 ```
 GET /c2t/{z}/{x}/{y}?u=<COG url>[&format=png|jpeg][&quality=80][&size=256]
-                      [&bidx=1,2,3][&rescale=min,max]
+                      [&bidx=1,2,3][&rescale=min,max][&blackmax=0]
 GET /c2t/{z}/{x}/{y}.geojson?u=<COG url>   # COG footprint (debug)
 GET /c2t.tms.json?u=<COG url>              # TileJSON (bbox, minzoom/maxzoom)
 GET /healthz
@@ -29,6 +29,10 @@ GET /healthz
 
 - Tile scheme: XYZ (OSM/Leaflet numbering, y-down), output PNG (RGBA, alpha 0
   outside coverage) or JPEG (`quality`, solid `EMPTY_TILE_BG` outside coverage).
+- `blackmax=0..255`: pixels whose brightest band is ≤ this value (near-black,
+  typically the unmasked fringes at orthophoto edges) are treated as
+  no-coverage — transparent PNG / `EMPTY_TILE_BG` JPEG. Default `20` (env
+  `BLACKMAX`); `blackmax=-1` returns every pixel as rendered.
 - Tiles outside the COG footprint return `200` with an empty (transparent) tile.
 - `400` bad zoom / tile index / format / size / URL (also 16-bit data without
   `rescale`, unsupported CRS, redirect chain refused because its `Location` is
@@ -140,6 +144,7 @@ decoding inline.
 | `VALIDATE_TIMEOUT` | `5` | timeout (s) of that version check, which sits in front of a tile response |
 | `MAX_REDIRECTS` | `5` | 30x hops followed for a COG URL (each hop re-validated); `0` refuses any redirect |
 | `EMPTY_TILE_BG` | `0,0,0` | solid RGB used for empty JPEG tiles |
+| `BLACKMAX` | `20` | default near-black transparency threshold (`-1` disables; per-request `&blackmax=`) |
 | `ALLOWED_HOSTS` | — | if set, comma-separated COG host allowlist |
 
 Security: only `http(s)` COG URLs are accepted, targets resolving to private or

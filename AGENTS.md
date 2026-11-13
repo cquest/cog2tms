@@ -9,14 +9,15 @@ Tile data is fetched from the remote COG via **HTTP byte-range requests** (never
 ## API contract
 
 ```
-GET /c2t/{z}/{x}/{y}?u=https://…/image.tif[&format=png|jpeg][&quality=80][&bidx=1,2,3][&rescale=min,max][&size=256]
+GET /c2t/{z}/{x}/{y}?u=https://…/image.tif[&format=png|jpeg][&quality=80][&bidx=1,2,3][&rescale=min,max][&blackmax=0][&size=256]
 GET /c2t/{z}/{x}/{y}.geojson?u=…      # COG footprint (debug)
 GET /c2t.tms.json?u=…                 # TileJSON: bounds, COG minzoom/maxzoom
 GET /healthz
 ```
 
-Errors: `400` (z/x/y outside matrix, invalid format/URL/scheme, 16-bit data without `rescale`,
-unsupported CRS, redirect chain refused or looping), `404` (unreachable COG, file is not a
+Errors: `400` (z/x/y outside matrix, invalid format/URL/scheme, bidx/rescale/blackmax,
+16-bit data without `rescale`, unsupported CRS, redirect chain refused or looping),
+`404` (unreachable COG, file is not a
 GeoTIFF), `502` (upstream timeout/error).
 
 ## Locked decisions
@@ -185,7 +186,8 @@ Code style: **minimal code and comments**, idiomatic, no over-engineering.
 
 ## App settings (env)
 
-`MAX_ZOOM` (24), `EMPTY_TILE_BG`, `READER_TTL` (600s), `POOL_SIZE` (64),
+`MAX_ZOOM` (24), `EMPTY_TILE_BG`, `BLACKMAX` (20, near-black → transparent;
+`-1` disables, per-request `&blackmax=`), `READER_TTL` (600s), `POOL_SIZE` (64),
 `MAX_CONCURRENT_READS` (8), `BLOCK_CACHE` (1500 blocks/COG), `DECODE_THREADS` (4 block-decode threads, 1 = inline), `MERGE_GAP` (4 KB),
 `TILE_CACHE` (1024 encoded tiles, LRU, 0 disables), `PNG_COMPRESS` (1),
 `HEAD_PREFETCH` (65536 B bulk head read at open), `MULTIRANGE` (1, multi-range GETs),
@@ -229,7 +231,10 @@ tile**: the tile straddling the fixture's east edge renders transparent >2 tile-
 outside the footprint (4326 and 3857 paths), and `_sample` given `fx/fy` whose
 stencil lies outside the window yields transparent pixels, not clamped edge
 values; 400 paths (zoom, x/y,
-format, scheme, bidx, rescale); 404 missing COG; `size`/`bidx`; TileJSON/GeoJSON/healthz;
+format, scheme, bidx, rescale, blackmax); 404 missing COG; `size`/`bidx`; TileJSON/GeoJSON/healthz;
+**blackmax** (default `BLACKMAX=20`, `-1` passes everything through): on a fully
+covered tile the near-black corner becomes transparent,
+colors untouched and the split exact (`max|band| ≤ blackmax` gone, `> blackmax` kept);
 **reprojection parity** 4326 vs 3857 (MSE < 100); local byte-range proof (served ≪ file
 size, every request has `Range:`); multi-range fallback learned per host; **codecs**:
 JPEG-in-TIFF fixture renders like the deflate one (mean diff 0.3, max 3) and stays
@@ -287,7 +292,8 @@ decode stage) and `/tmp/opencode/live_ab.py` (two servers, cold tiles).
 | 3 | URL validation/anti-SSRF, semaphores, COG fixtures + Range proxy + parity + `network` tests | done |
 | 4 | Dockerfile, README, verification against public COGs | done (image not built locally: daemon without permission here, but `pip install .` + import verified) |
 
-Possible follow-ups: WebP, average-area resampling option (`resampling=`), rescale
+Possible follow-ups: same output compression as input,
+WebP, average-area resampling option (`resampling=`), rescale
 percentile auto, host allowlist tests, BigTIFF overview masks on more samples, seam test
 across the 4 Bayonne COGs. Decoding: **imagecodecs** would add the other TIFF codecs
 (ZSTD/LERC/CCITT/JPEG-XL) and beat our pure-Python ones (PackBits 7.3 µs vs 133 µs,
@@ -298,4 +304,4 @@ non-dependency lever. Known open security gaps (documented, not implemented):
 **DNS rebinding / TOCTOU** (`check_url` resolves, then the connection resolves again —
 closing it needs pinning the validated IP, delicate for HTTPS certificate checks) and
 the `ipaddress.is_global` table being CPython-version dependent (multicast, NAT64
-`64:ff9b::/96` slip through).
+`64:ff9b::/96` slip through), web ui to generate cog2tms url from a COG url with a preview map based on leaflet.

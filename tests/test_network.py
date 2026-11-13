@@ -26,7 +26,9 @@ def test_native_tile(client):
 
 
 def test_overview_tile_fast(client):
-    r = _t(client, f"/c2t/13/4063/2995?u={COG_SMALL}")
+    # blackmax=-1: the z13 overview of this COG is dark water (mean < 20), it
+    # would be fully transparent with the default threshold - this test is about overview rendering
+    r = _t(client, f"/c2t/13/4063/2995?u={COG_SMALL}&blackmax=-1")
     assert r.status_code == 200
     a = np.asarray(Image.open(io.BytesIO(r.content)))
     assert (a[..., 3] > 0).sum() > 10000
@@ -47,7 +49,7 @@ def test_edge_tile_transparent(client):
     from app.crs import WEBMERCATOR
     from app.tiles import tile_web_bounds
     a = np.asarray(Image.open(io.BytesIO(
-        _t(client, f"/c2t/13/4064/2995?u={COG_SMALL}").content)))
+        _t(client, f"/c2t/13/4064/2995?u={COG_SMALL}&blackmax=-1").content)))  # threshold off: test is about edges
     v = a[..., 3] > 0
     assert v.sum() > 20000  # most of the footprint half still renders
     w, s, e, n = _t(client, f"/c2t.tms.json?u={COG_SMALL}").json()["bbox"]

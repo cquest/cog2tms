@@ -35,10 +35,10 @@ class ReaderPool:
             return cog
 
     async def render(self, cog: CogFile, z: int, x: int, y: int, size: int,
-                     bidx=None, rescale=None):
+                     bidx=None, rescale=None, blackmax=None):
         from . import tiles
         async with self._sem:
-            return await asyncio.to_thread(tiles.render_tile, cog, z, x, y, size, bidx, rescale)
+            return await asyncio.to_thread(tiles.render_tile, cog, z, x, y, size, bidx, rescale, blackmax)
 
     def invalidate(self, url: str):
         """Drop the reader of a COG whose remote file was replaced: its header,

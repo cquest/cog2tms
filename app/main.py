@@ -71,6 +71,21 @@ def _parse_rescale(rescale: str | None) -> tuple[float, float] | None:
     return lo, hi
 
 
+def _parse_blackmax(blackmax: str | None) -> int | None:
+    if not blackmax:
+        v = config.BLACKMAX
+    else:
+        try:
+            v = int(blackmax)
+        except ValueError:
+            raise HTTPException(400, "bad blackmax")
+    if v < 0:  # -1 (or any negative) explicitly disables the black -> transparent pass
+        return None
+    if v > 255:
+        raise HTTPException(400, "bad blackmax")
+    return v
+
+
 async def _open(u: str):
     try:
         check_url(u)
@@ -109,7 +124,7 @@ async def footprint(z: int, x: int, y: int, u: str = Query(...)):
 @app.get("/c2t/{z}/{x}/{y}")
 async def tile(z: int, x: int, y: int, u: str = Query(...), format: str = "png",
                quality: int = 80, bidx: str | None = None, rescale: str | None = None,
-               size: int = 256):
+               blackmax: str | None = None, size: int = 256):
     if not 0 <= z <= config.MAX_ZOOM:
         raise HTTPException(400, "bad zoom")
     n = 1 << z
@@ -120,7 +135,7 @@ async def tile(z: int, x: int, y: int, u: str = Query(...), format: str = "png",
     if not 1 <= size <= 1024:
         raise HTTPException(400, "bad size")
     quality = max(1, min(95, quality))
-    key = f"{u}|{z}|{x}|{y}|{format}|{quality}|{size}|{bidx}|{rescale}"
+    key = f"{u}|{z}|{x}|{y}|{format}|{quality}|{size}|{bidx}|{rescale}|{blackmax}"
     # at most one 1-byte If-Range probe per VALIDATE_TTL and per COG: it drops
     # cached tiles and the open reader when the file was replaced under the URL
     await _revalidate(u)
@@ -132,7 +147,7 @@ async def tile(z: int, x: int, y: int, u: str = Query(...), format: str = "png",
             async with lock:
                 blob = _tiles_cache.get(key)
                 if blob is None:
-                    blob = await _render_tile(u, z, x, y, format, quality, size, bidx, rescale)
+                    blob = await _render_tile(u, z, x, y, format, quality, size, bidx, rescale, blackmax)
                     if config.TILE_CACHE:
                         _tiles_cache[key] = blob
                         while len(_tiles_cache) > config.TILE_CACHE:
@@ -154,24 +169,27 @@ async def _revalidate(u: str):
 
 
 async def _render_tile(u: str, z: int, x: int, y: int, format: str, quality: int,
-                       size: int, bidx: str | None, rescale: str | None) -> bytes:
+                       size: int, bidx: str | None, rescale: str | None,
+                       blackmax: str | None) -> bytes:
     """Render, reopening the COG once if a read reveals a replaced file."""
     try:
-        return await _render(u, z, x, y, format, quality, size, bidx, rescale)
+        return await _render(u, z, x, y, format, quality, size, bidx, rescale, blackmax)
     except CogChanged:
         _purge(u)
         try:
-            return await _render(u, z, x, y, format, quality, size, bidx, rescale)
+            return await _render(u, z, x, y, format, quality, size, bidx, rescale, blackmax)
         except CogChanged as e:
             raise HTTPException(503, f"COG keeps changing: {e}")
 
 
 async def _render(u: str, z: int, x: int, y: int, format: str, quality: int,
-                  size: int, bidx: str | None, rescale: str | None) -> bytes:
+                  size: int, bidx: str | None, rescale: str | None,
+                  blackmax: str | None) -> bytes:
     cog = await _open(u)
     try:
         rgb, valid = await pool.render(cog, z, x, y, size,
-                                       _parse_bidx(bidx), _parse_rescale(rescale))
+                                       _parse_bidx(bidx), _parse_rescale(rescale),
+                                       _parse_blackmax(blackmax))
     except EmptyTile:
         return empty_tile(format, size, config.EMPTY_TILE_BG)
     except CogChanged:

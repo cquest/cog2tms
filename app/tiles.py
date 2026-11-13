@@ -57,7 +57,8 @@ def _pick_level(cog, span_main_px: float, size: int) -> int:
 
 
 def render_tile(cog, z: int, x: int, y: int, size: int,
-                bidx: list[int] | None = None, rescale: tuple[float, float] | None = None):
+                bidx: list[int] | None = None, rescale: tuple[float, float] | None = None,
+                blackmax: int | None = None):
     """Return (rgb uint8 (size,size,3), valid bool (size,size))."""
     if not tile_exists(cog, z, x, y):
         raise EmptyTile()
@@ -110,7 +111,11 @@ def render_tile(cog, z: int, x: int, y: int, size: int,
     else:
         fx, fy = _warp_grid(cog, tx0, ty0, tx1, ty1, size, scale, wc0, wr0)
 
-    return _sample(data, valid, fx, fy)
+    rgb, valid = _sample(data, valid, fx, fy)
+    if blackmax is not None:
+        # unmasked ortho edges: pixels that are (near-)black on every band go transparent
+        valid &= rgb.max(axis=-1) > blackmax
+    return rgb, valid
 
 
 def _warp_grid(cog, tx0, ty0, tx1, ty1, size, scale, wc0, wr0):

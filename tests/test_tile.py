@@ -92,6 +92,49 @@ def test_sampler_outside_window_transparent():
     assert (rgb[v] == 100).all() and not rgb[~v].any()
 
 
+def test_blackmax_transparent(client, server):
+    """blackmax: pixels near black on every band (unmasked ortho edges) go
+    transparent inside fully covered tiles; other pixels and colors unchanged."""
+    z, xc, yc = fixture_tile()
+    x, y = xc - 1, yc - 1  # tile over the fixture's NW corner: the pattern is near-black there
+    a0 = np.asarray(Image.open(io.BytesIO(
+        client.get(tile_url(server, COG4326, z, x, y, blackmax=-1)).content)))  # explicit pass-through
+    assert (a0[..., 3] > 0).all()  # tile fully inside the footprint
+    a1 = np.asarray(Image.open(io.BytesIO(
+        client.get(tile_url(server, COG4326, z, x, y, blackmax=40)).content)))
+    assert (a0[..., :3] == a1[..., :3]).all()  # colors untouched, alpha only
+    gone = (a0[..., 3] > 0) & (a1[..., 3] == 0)
+    kept = a1[..., 3] > 0
+    assert gone.sum() > 1000
+    assert a1[..., :3][gone].max(axis=-1).max() <= 40
+    assert a1[..., :3][kept].max(axis=-1).min() > 40
+
+
+def test_blackmax_default(client, server):
+    """Default threshold BLACKMAX=20: darker-than-default requests keep every
+    pixel, the default drops the near-black ones and nothing else."""
+    z, xc, yc = fixture_tile()
+    x, y = xc - 2, yc - 1  # covers the fixture's near-black NW corner inside the footprint
+    a_full = np.asarray(Image.open(io.BytesIO(
+        client.get(tile_url(server, COG4326, z, x, y, blackmax=-1)).content)))
+    a_def = np.asarray(Image.open(io.BytesIO(
+        client.get(tile_url(server, COG4326, z, x, y)).content)))
+    assert (a_full[..., :3] == a_def[..., :3]).all()
+    gone = (a_full[..., 3] > 0) & (a_def[..., 3] == 0)
+    assert gone.sum() > 1000
+    assert a_def[..., :3][gone].max(axis=-1).max() <= 20
+    assert a_def[..., :3][a_def[..., 3] > 0].max(axis=-1).min() > 20
+
+
+def test_blackmax_validation(client, server):
+    z, x, y = fixture_tile()
+    u = f"{server.base}/{COG4326}"
+    for bad in ("abc", "256"):
+        r = client.get(f"/c2t/{z}/{x}/{y}", params={"u": u, "blackmax": bad})
+        assert r.status_code == 400, bad
+    assert client.get(f"/c2t/{z}/{x}/{y}", params={"u": u, "blackmax": "-1"}).status_code == 200
+
+
 def test_bad_requests(client, server):
     z, x, y = fixture_tile()
     u = f"{server.base}/{COG4326}"
