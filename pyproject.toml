@@ -1,6 +1,7 @@
 [project]
 name = "cog2tms"
 description = "Serve TMS tiles (EPSG:3857) from a remote COG read over HTTP byte-range"
+license = "WTFPL"
 dynamic = ["version"]
 requires-python = ">=3.12"
 dependencies = [

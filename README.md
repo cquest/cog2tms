@@ -130,3 +130,8 @@ docker run -p 3857:3857 cog2tms   # http://localhost:3857
 ```
 
 Design notes, supported-CRS list and roadmap: [AGENTS.md](AGENTS.md).
+
+## License
+
+WTFPL v2 — see [LICENSE](LICENSE). Vendored third-party files keep their own
+terms: MapLibre GL JS (BSD-3-Clause, unmodified), the JOSM icon (public domain).
