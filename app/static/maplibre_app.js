@@ -56,16 +56,16 @@ async function load() {
       getJSON("c2t/0/0/0.geojson?" + qs),  // z/x/y unused: always the footprint
     ]);
     info = tj;
+
+    // open at the TileJSON minzoom, centered on the bbox center
+    const [w, s, e, n] = tj.bbox;
+    map.jumpTo({center: [(w + e) / 2, (s + n) / 2],
+                zoom: Math.max(0, Math.min(tj.minzoom ?? 0, MAX_ZOOM))});
+
     fpData = gj;
     renderInfo(tj, gj);
     setUrls();
     ensureOverlays();
-    if (!viewFromUrl) {
-      // open at the TileJSON minzoom, centered on the bbox center
-      const [w, s, e, n] = tj.bbox;
-      map.jumpTo({center: [(w + e) / 2, (s + n) / 2],
-                  zoom: Math.max(0, Math.min(tj.minzoom ?? 0, MAX_ZOOM))});
-    }
     share();
   } catch (e) {
     showError(e.message);
