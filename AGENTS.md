@@ -63,24 +63,31 @@ simplejpeg, imagecodecs, opencv-python-headless; dev: pytest + pytest-cov + http
 - CRS subset (`app/crs.py`, pure Python): 4326, 3857, 2154 (Lambert-93),
   CC42–CC48 (3942–3948), UTM 326xx/327xx, user-defined LCC/TM from the
   projection keys (3075 = CT 1/8/9/27, both GDAL and ESRI key spellings):
-  Snyder series, forward and inverse — the inverse matches PROJ `+approx`
-  (same series family) to ≤ 0.05 mas; a wrong D⁵ longitude coefficient had
-  put ~99 m of error in UTM tiles far from the central meridian. < 1 cm and
-  < 1 mm vs PROJ golden values; anything else → 400.
+  Snyder series, forward and inverse; < 1 cm and < 1 mm vs PROJ golden values
+  (the inverse matches PROJ `+approx`, same series family, to ≤ 0.05 mas);
+  anything else → 400.
 
 ## Warp pipeline (`app/tiles.py`)
 
-Overview level chosen so the source window ≥ tile/2 px; the window is **not
-clamped to the raster** — `_window` pads outside pixels with zeros + `valid=False`
-so tiles straddling the COG edge go transparent instead of smearing the last
-row/column → blocks read via `reader.read_many` (adjacent ranges merged within
-`MERGE_GAP`, groups fetched in parallel) → decode inline, or in the shared
-`_POOL` when the window is ≥ 1 Mpx **and** the codec releases the GIL → per-pixel
-source coords (exact affine if the source is 3857, else **17×17 inverse-projection
-control grid** bilinearly interpolated) → bilinear resample by `cv2.remap`
-(`data*valid` and `valid` remapped with `BORDER_CONSTANT`, then divided: out-of-
-window/out-of-footprint samples contribute 0 to both, so invalid pixels divide to
-exactly 0 — no clamp, no branch) → encode PNG/JPEG/WebP (`main._encode`).
+Overview level chosen so the source window ≥ **tile px** — never resample up
+(the old tile/2 rule halved zoomed-out sharpness, −1.5× gradient energy, for a
+~4× smaller window: not worth it); the window is **not clamped to the raster** —
+`_window` pads outside pixels with zeros + `valid=False` so tiles straddling
+the COG edge go transparent instead of smearing the last row/column → blocks
+read via `reader.read_many` (adjacent ranges merged within `MERGE_GAP`, groups
+fetched in parallel) → decode inline, or in the shared `_POOL` when the window
+is ≥ 1 Mpx **and** the codec releases the GIL → per-pixel source coords (exact
+affine if the source is 3857, else **17×17 inverse-projection control grid**
+bilinearly interpolated) → bilinear resample by `cv2.remap` of premultiplied
+`data*valid` + `valid`, both with `BORDER_CONSTANT`, then divided: out-of-
+window/out-of-footprint samples contribute 0 to both, so invalid pixels divide
+to exactly 0 — no clamp, no branch (sampling coordinates count source **pixel
+centers**, `ox/oy` are GeoTIFF corners: the grids carry a `- 0.5`, without it
+every tile was corner-sampled and low-passed even at 1:1) → Gaussian **unsharp
+mask** on overview tiles (`_sharpen`, `SHARPEN=0.3`, never at level 0,
+halo-guarded to pixels whose 3×3 neighborhood is fully valid; all-C mask ops,
+≈0.2 ms — numpy needs 6× more for the same filter) → encode PNG/JPEG/WebP
+(`main._encode`).
 `cv2.setNumThreads(1)` at import: internal threading gains nothing at 256² and
 would oversubscribe across uvicorn workers.
 
@@ -94,11 +101,10 @@ would oversubscribe across uvicorn workers.
   **multi-range GET** (`multipart/byteranges`) — rejection remembered per host.
 - **Encoded-tile LRU** (`TILE_CACHE`) + per-key `asyncio.Lock` single-flight.
 - **Block decode in `_POOL`** (`DECODE_THREADS`, gated by `_PAR_MIN_PX` = 1 Mpx):
-  works for GIL-free codecs (simplejpeg, zlib, imagecodecs LZW and WebP —
-  libwebp releases the GIL); Pillow (JPEG or WebP when imagecodecs is absent),
-  imagecodecs PackBits (9 µs/128² block) and ZSTD (53 µs) stay inline but are
-  fast enough; libwebp itself is heavier (≈0.3–0.9 ms/128² block) but only a
-  handful of blocks decode per tile.
+  only GIL-free codecs go there (simplejpeg, zlib, imagecodecs LZW and WebP —
+  libwebp releases the GIL, ≈0.3–0.9 ms/128² block, only a handful per tile);
+  Pillow (JPEG/WebP fallback), imagecodecs PackBits (9 µs) and ZSTD (53 µs)
+  stay inline but are fast enough.
 - **Warp = `cv2.remap`** of premultiplied `data*valid` + `valid` + renorm
   (≈1.4–2 ms per 256² tile vs 16–18 ms for the numpy gather; a dependency-free
   numpy rewrite only reaches ≈11 ms — this is why the opencv wheel is kept).
@@ -107,9 +113,9 @@ would oversubscribe across uvicorn workers.
 
 - `httprange._versions`: `url -> (ETag|Last-Modified, total size)` anchored from
   the first 206/HEAD and kept across reader reopens.
-- Later single-range GETs carry `If-Range` (direct hosts only): a replaced file
-  makes the server answer `200 + whole file` → `CogChanged`, raised **before the
-  body is read**. Never sent on multi-range GETs; for servers that ignore
+- Later single-range GETs carry `If-Range` (direct hosts only, never on multi-
+  range GETs): a replaced file makes the server answer `200 + whole file` →
+  `CogChanged`, raised **before the body is read**; for servers that ignore
   `If-Range`, ETag/size drift between responses also raises `CogChanged`.
 - Cached tiles are revalidated by one 1-byte `If-Range` GET at most every
   `VALIDATE_TTL` s; probe failures are ignored — cached bytes keep being served
@@ -118,18 +124,18 @@ would oversubscribe across uvicorn workers.
   every tile-cache key starting with `url|`, then re-render once; two consecutive
   render failures → 503.
 - Behind a redirect, `If-Range`/ETag anchoring is **skipped** (`_direct` false):
-  validators of one host must never be presented to another (alternating mirrors
-  would cause endless `CogChanged` → 503). Size drift is still checked and the
-  probe re-walks the chain. Not caught: in-place replacement behind a stable
-  target with identical total size.
+  one host's validators must never be presented to another (alternating mirrors
+  would loop `CogChanged` → 503). Size drift is still checked and the probe
+  re-walks the chain. Not caught: in-place replacement behind a stable target
+  with identical total size.
 
 ## Redirects answered by the remote server
 
 - `httprange._follow` walks 30x itself (`allow_redirects=False` everywhere,
   `MAX_REDIRECTS`=5, loop detection): every `Location` is resolved with `urljoin`
   and passed through `check_url` **before** connecting — a remote server cannot
-  send us to a private/reserved host or outside `ALLOWED_HOSTS`. Refusal/loop/
-  hop-limit → `CogRedirect` → 400; the refused host is never contacted.
+  send us to a private/reserved host or outside `ALLOWED_HOSTS`; refusal/loop/
+  hop-limit → `CogRedirect` → 400, the refused host is never contacted.
 - One walk per reader, not per range: reads go straight to the settled host
   (`_target`); the 404/403 negative cache stays keyed by the requested URL;
   a 3xx body is closed unread.
@@ -164,7 +170,8 @@ cog2tms/
 │   ├── test_versions.py   # coherence when the COG is replaced under one URL
 │   ├── test_redirects.py  # own 30x walking + per-hop check_url + target moves
 │   ├── test_codecs.py     # JPEG-in-TIFF fixtures, codec parity, ZSTD, threaded decode
-│   ├── test_pixels.py     # 16-bit rescale, nodata, alpha, internal mask, sliced index
+│   ├── test_pixels.py     # 16-bit rescale, nodata, alpha, internal mask, sliced index,
+│   │                      # pixel-center 1:1 warp, sharpen gating
 │   ├── test_format.py     # webp output + format=auto Accept negotiation
 │   └── test_network.py    # integration on remote COGs (`network` marker) + relay proxy proof
 ├── Dockerfile             # python:3.12-slim → pip install . → uvicorn --workers 4
@@ -250,6 +257,13 @@ by a local Range-capable HTTP server that counts bytes. Pinned behaviors (do not
   **SubIFD overviews** (tag 330, empty IFD chain) open with the same levels and
   render pixel-identical; **count-0 blocks** (merger holes, fixture offsets
   past EOF) are never fetched and stay no-coverage;
+- **warp convention**: a fixture georeferenced exactly 1:1 on the tile matrix
+  renders **bit-identical to the source pixels** — pins pixel-center sampling
+  (remap coordinates vs GeoTIFF corner `ox/oy`) and the never-upscale overview
+  rule (a 128 px window for a 256 px tile is refused, level 0 used); overview
+  tiles are unsharp-masked but pixels bordering no-coverage are left untouched
+  (no halo on the footprint edge), and level-0 tiles are byte-identical
+  whatever `SHARPEN` is set to;
 - **byte-range proof**: served bytes ≪ file size, every upstream request has
   `Range:`; multi-range fallback learned per host;
 - **codecs**: JPEG-in-TIFF renders like the deflate fixture and stays north-up;
@@ -298,9 +312,9 @@ by a local Range-capable HTTP server that counts bytes. Pinned behaviors (do not
 
 ## Status
 
-Roadmap 1–4 done: skeleton + PNG tiles + pool; JPEG/bidx/rescale/geojson/
-TileJSON/healthz/CORS; anti-SSRF + fixtures + network tests; Docker + README +
-public-COG verification. WebP and `format=auto` done on top.
+Roadmap 1–4 done (skeleton/PNG/pool; JPEG/bidx/rescale/geojson/TileJSON/
+healthz/CORS; anti-SSRF + fixtures + network tests; Docker + README + public-
+COG verification), plus WebP and `format=auto` on top.
 
 ## Follow-ups
 

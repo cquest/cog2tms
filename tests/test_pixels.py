@@ -1,13 +1,16 @@
 """Pixel semantics beyond plain RGB8: 16-bit + rescale, GDAL nodata, ExtraSamples
-alpha, and the sliced fetch of big TileOffsets/TileByteCounts arrays."""
+alpha, the sliced fetch of big TileOffsets/TileByteCounts arrays, the sharpen
+gating, and the pixel-center 1:1 warp convention."""
+import cv2
 import numpy as np
 import pytest
 
+from app import config
 from app import geotiff as g
 from app import tiles
 from app.httprange import LocalReader
 from .conftest import (COG16, COG4326, COGALPHA, COGHOLE, COGMASK, COGND, COGROT,
-                       COGSUB, W, fixture_tile)
+                       COGSUB, W, fixture_tile, write_cog)
 
 
 def _open(fixtures_dir, name):
@@ -160,3 +163,48 @@ def test_count_zero_blocks_are_holes(fixtures_dir):
     assert not valid[:, -1].any() and valid[:, :8].all() and rvalid[:, -1].all()
     assert not (valid & ~rvalid).any()
     assert (rgb[valid] == rrgb[valid]).all()
+
+
+def test_sharpen_gates(fixtures_dir, monkeypatch):
+    """Overview tiles get the unsharp mask (anti-halo: only pixels whose 3x3
+    neighborhood is fully valid are touched, so no liseré along the footprint),
+    and full-resolution tiles are never modified."""
+    cog = _open(fixtures_dir, COG4326)
+    try:
+        z, x, y = fixture_tile(12)  # there the 2x overview is the never-upscale pick
+        monkeypatch.setattr(config, "SHARPEN", 0.0)
+        raw, v = tiles.render_tile(cog, z, x, y, 256)
+        monkeypatch.setattr(config, "SHARPEN", 0.5)
+        sharp, _ = tiles.render_tile(cog, z, x, y, 256)
+        assert v.any() and (sharp != raw).any()
+        inner = cv2.erode(v.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+        assert (sharp[~inner] == raw[~inner]).all()  # untouched along the edges
+        z, x, y = fixture_tile()  # z14: level 0 is the pick -> gate closed
+        a, _ = tiles.render_tile(cog, z, x, y, 256)
+        monkeypatch.setattr(config, "SHARPEN", 0.0)
+        b, _ = tiles.render_tile(cog, z, x, y, 256)
+        assert (a == b).all()
+    finally:
+        cog.close()
+
+
+def test_pixel_center_sampling_1to1(tmp_path):
+    """Raster georeferenced exactly 1:1 on the tile matrix (tile px == source
+    px, footprint corner == tile corner): the render must reproduce the source
+    pixels bit-for-bit. Pins both the sampling convention (remap coordinates
+    are pixel centers, ox/oy are GeoTIFF corners -> no corner low-pass) and
+    the never-upscale overview rule (a 2x overview window of 128 px is refused
+    at 1:1, level 0 is used)."""
+    z = 13
+    x, y = 2200, 4400  # arbitrary tile of that matrix row/column
+    tx0, ty0, tx1, ty1 = tiles.tile_web_bounds(z, x, y)
+    psx = (tx1 - tx0) / 256.0
+    write_cog(tmp_path / "align.tif", tx0, ty1, psx, psx, geographic=False)
+    cog = g.CogFile(LocalReader(str(tmp_path / "align.tif")))
+    try:
+        src, valid = cog.window(0, 0, 0, 256, 256)
+        rgb, v = tiles.render_tile(cog, z, x, y, 256)
+        assert v.all()
+        assert (rgb == src).all()
+    finally:
+        cog.close()

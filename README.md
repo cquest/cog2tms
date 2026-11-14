@@ -8,41 +8,34 @@
 
 [Français](README_fr.md)
 
-Serve map tiles as TMS from a Cloud Optimized GeoTIFF (COG).
-
-Give it the URL of a COG, it reads the file remotely and returns Z/X/Y
-(OSM scheme) tiles reprojected to EPSG:3857 (Web Mercator).
+Give it the URL of a Cloud Optimized GeoTIFF: it reads the file remotely (HTTP
+byte-ranges only, never the whole file) and serves Z/X/Y tiles (OSM scheme)
+reprojected to EPSG:3857 (Web Mercator).
 
 ## API
 
 ```
-GET /                                        # web UI (form + MapLibre preview, vector basemap)
-GET /static/…                                # web UI assets (vendored MapLibre, maplibre_app.js)
+GET /                                       # web UI: MapLibre preview (vector basemap) + tile URLs
 GET /c2t/{z}/{x}/{y}?u=<COG url>[&format=png|jpeg|webp|auto][&quality=80][&size=256]
                       [&bidx=1,2,3][&rescale=min,max][&blackmax=0]
 GET /c2t/{z}/{x}/{y}.geojson?u=<COG url>   # COG footprint (debug)
 GET /c2t.tms.json?u=<COG url>              # TileJSON (bbox, minzoom/maxzoom)
-GET /healthz
-GET /robots.txt
+GET /healthz   GET /robots.txt   GET /static/…   # health, robots policy, UI assets
 ```
 
-- Tile scheme: XYZ (OSM/Leaflet numbering, y-down). Output PNG (RGBA), JPEG
-  (solid `EMPTY_TILE_BG` outside coverage) or WebP (≈13× smaller than PNG on
-  ortho tiles; `WEBP_LOSSLESS=1` for lossless WebP).
-- `format=auto` follows only the `Accept` header: webp when `image/webp` is
-  listed explicitly (q>0), else png. Wildcards (`image/*`, `*/*`) never select
-  webp — JOSM sends them and cannot decode it.
-- `blackmax=0..255`: pixels whose brightest band is ≤ this value (near-black,
-  typically the unmasked fringes at orthophoto edges) become no-coverage.
-  Default `20`; `-1` disables.
-- Tiles outside the COG footprint: `200` with an empty (transparent) tile.
-- Errors: `400` bad zoom / index / format / size / URL, 16-bit data without
+- XYZ (OSM/Leaflet numbering, y-down). Formats: PNG (RGBA), JPEG, WebP
+  (≈12× smaller than PNG on ortho tiles). `format=auto` trusts only the
+  `Accept` header: webp iff `image/webp` is listed explicitly (q>0), never on
+  wildcards (`*/*` — JOSM sends them and cannot decode webp); default png.
+- Tiles outside the COG footprint: `200` + empty tile — transparent PNG/WebP,
+  solid `EMPTY_TILE_BG` for JPEG.
+- `blackmax=0..255`: near-black pixels (unmasked orthophoto fringes) become
+  no-coverage; default `20`, `-1` disables.
+- Errors: `400` zoom / index / format / size / URL, 16-bit data without
   `rescale`, unsupported CRS, refused redirect chain; `404` COG unreachable or
   not a GeoTIFF; `502` upstream error.
-- Anti-scraping: `robots.txt` disallows the tile API (`/c2t`) and every
-  response carries `X-Robots-Tag: nofollow, noimageindex` — tile urls are
-  images that robots.txt alone would not cover. (Deters well-behaved crawlers
-  only, not scrapers.)
+- Anti-scraping: `robots.txt` disallows `/c2t`, every response carries
+  `X-Robots-Tag: nofollow, noimageindex` (deters well-behaved crawlers only).
 
 ## Run locally
 
@@ -52,17 +45,17 @@ pip install -e ".[dev]"
 uvicorn app.main:app --reload --port 3857
 ```
 
-The web UI at `http://127.0.0.1:3857/`: paste a COG URL, get a MapLibre preview
-and ready-to-paste tile URLs. Or straight from the shell (the example COG is a
-public drone orthophoto, EPSG:3943):
+The web UI at `http://127.0.0.1:3857/` takes a COG URL and shows a MapLibre
+preview plus ready-to-paste tile URLs. From the shell (public example
+orthophoto, EPSG:3943):
 
 ```bash
 curl -o tile.png \
   "http://127.0.0.1:3857/c2t/18/130034/95856?u=https://data.cquest.org/temp/cog4josm/COG_BayonneSudEst.tif"
 ```
 
-In JOSM (Map paint settings → WMS/TMS sources → new `TMS` source) — JOSM's `{y}`
-is already top-down, no flip needed:
+In JOSM (Map paint settings → WMS/TMS sources → new `TMS` source — its `{y}`
+is already top-down):
 
 ```
 tms:http://127.0.0.1:3857/c2t/{zoom}/{x}/{y}?u=https://data.cquest.org/temp/cog4josm/COG_BayonneSudEst.tif
@@ -87,11 +80,11 @@ Measured on the Bayonne COG (875 MB, EPSG:3943) from a workstation:
 | first tile at max zoom (L0 block index) | no extra cost |
 | warm render (blocks cached) | ≈6 ms |
 | repeat of the same tile (tile cache) | ≈2 ms |
-| z18 tile encoding | PNG 103 KB, WebP 7.9 KB (≈13× smaller, ≈2 ms), JPEG 10 KB |
+| z18 tile encoding | PNG 134 KB, WebP 11.4 KB (≈12× smaller, ≈2 ms), JPEG 13.5 KB |
 
-Levers (bulk head prefetch, lazy block indexes, merged/parallel/multi-range
-fetches, `cv2.remap` warp, threaded decode, LRU tile cache with single-flight
-locks): detailed in [AGENTS.md](AGENTS.md).
+The levers behind these numbers (head prefetch, lazy block indexes,
+merged/parallel/multi-range fetches, `cv2.remap` warp, threaded decode, tile
+LRU with single-flight locks): [AGENTS.md](AGENTS.md).
 
 ## Configuration (environment variables)
 
@@ -117,18 +110,18 @@ locks): detailed in [AGENTS.md](AGENTS.md).
 | `MAX_REDIRECTS` | `5` | 30x hops followed, each re-validated (`0` refuses redirects) |
 | `EMPTY_TILE_BG` | `0,0,0` | solid RGB used for empty JPEG tiles |
 | `BLACKMAX` | `20` | default near-black transparency threshold (`-1` disables) |
+| `SHARPEN` | `0.3` | unsharp mask on overview tiles (full-resolution tiles untouched; `0` disables) |
 | `ALLOWED_HOSTS` | — | if set, comma-separated COG host allowlist |
 
-- **Anti-SSRF**: only `http(s)` COG URLs; targets resolving to private or
-  reserved IPs are rejected (dev/tests: `ALLOW_PRIVATE_NET=1`); every `Location`
-  of a 30x chain is re-validated before connecting; the URL policy (allowlist
-  included) is checked on every request, even one answered from the tile cache.
+- **Anti-SSRF**: http(s) only; private/reserved IPs rejected (dev/tests:
+  `ALLOW_PRIVATE_NET=1`); every redirect `Location` re-validated before
+  connecting; the URL policy (allowlist included) applies to every request,
+  cache hits included.
 - **Resilience**: 429/5xx retried transparently (`Retry-After` honored); remote
-  404/403 remembered per URL; cached tiles keep being served while upstream is
-  down.
+  404/403 remembered; cached tiles keep being served while upstream is down.
 - **Coherence**: each COG's `ETag`/`Last-Modified`/size is anchored and later
-  requests carry `If-Range`; any drift drops that COG's reader and cached tiles
-  — a replacement's whole-file 200 answer is never downloaded.
+  requests carry `If-Range`; any drift drops the reader and its cached tiles —
+  a replacement's whole-file 200 answer is never downloaded.
 
 ## Docker
 

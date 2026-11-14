@@ -56,6 +56,11 @@ MULTIRANGE = os.getenv("MULTIRANGE", "1") == "1"
 # &blackmax=
 BLACKMAX = int(os.getenv("BLACKMAX", "20"))
 
+# unsharp-mask strength (0-1) compensating overview averaging: applied only to
+# tiles built from an overview level, never at full resolution, and never next
+# to no-coverage pixels (halo guard); 0 disables
+SHARPEN = float(os.getenv("SHARPEN", "0.3"))
+
 # bulk read of the COG head zone (IFDs, GeoTIFF tags) to avoid many tiny
 # round-trips at open; 0 disables
 HEAD_PREFETCH = int(os.getenv("HEAD_PREFETCH", "65536"))

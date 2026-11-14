@@ -1,10 +1,12 @@
 """Render EPSG:3857 XYZ tiles from a CogFile (any source CRS in the supported
 subset). Non-affine warps use a 17x17 control grid (inverse projection at grid
-nodes) interpolated bilinearly per pixel, then bilinear resampling of pixels."""
+nodes) interpolated bilinearly per pixel, then bilinear resampling. Remap
+coordinates count source pixel centers; ox/oy are GeoTIFF corners (hence the
+- 0.5 in the sampling grids)."""
 import cv2
 import numpy as np
 
-from . import crs
+from . import config, crs
 
 cv2.setNumThreads(1)  # 256 px warps: OpenCV's internal threading gains nothing and
 # would oversubscribe the cores between uvicorn workers
@@ -48,10 +50,12 @@ def tile_exists(cog, z, x, y) -> bool:
 
 
 def _pick_level(cog, span_main_px: float, size: int) -> int:
-    """Largest overview whose window stays >= size/2 pixels."""
+    """Largest overview whose window stays >= size pixels: never resample up
+    (size/2 was tried and made zoomed-out tiles visibly soft - the pyramid can
+    always be read at full tile resolution without fetching that much more)."""
     w0 = cog.levels[0].width
     level = 0
-    while level + 1 < len(cog.levels) and span_main_px * cog.levels[level + 1].width / w0 >= size / 2:
+    while level + 1 < len(cog.levels) and span_main_px * cog.levels[level + 1].width / w0 >= size:
         level += 1
     return level
 
@@ -106,8 +110,11 @@ def render_tile(cog, z: int, x: int, y: int, size: int,
         u = np.arange(size) + 0.5
         X = tx0 + (tx1 - tx0) * u / size
         Y = ty1 + (ty0 - ty1) * u / size
-        fx = np.broadcast_to((X - cog.ox) / (cog.psx * scale) - wc0, (size, size))
-        fy = np.broadcast_to(((cog.oy - Y) / (cog.psy * scale) - wr0)[:, None], (size, size))
+        # - 0.5: ox/oy are pixel corners (GeoTIFF convention), remap coordinates
+        # count pixel centers - sampling the corners would low-pass every tile
+        fx = np.broadcast_to((X - cog.ox) / (cog.psx * scale) - wc0 - 0.5, (size, size))
+        fy = np.broadcast_to(((cog.oy - Y) / (cog.psy * scale) - wr0 - 0.5)[:, None],
+                             (size, size))
     else:
         fx, fy = _warp_grid(cog, tx0, ty0, tx1, ty1, size, scale, wc0, wr0)
 
@@ -115,7 +122,22 @@ def render_tile(cog, z: int, x: int, y: int, size: int,
     if blackmax is not None:
         # unmasked ortho edges: pixels that are (near-)black on every band go transparent
         valid &= rgb.max(axis=-1) > blackmax
+    if level and config.SHARPEN > 0:
+        _sharpen(rgb, valid)
     return rgb, valid
+
+
+def _sharpen(rgb, valid):
+    """Classical unsharp mask (Gaussian), in place: overview pyramids are built
+    by averaging, and tiles read from them visibly lack the contrast that full
+    resolution keeps. Only pixels whose 3x3 neighborhood is fully valid are
+    touched - the invalid neighbours in `rgb` are black, and sampling across a
+    coverage edge would draw a dark halo along the footprint."""
+    k = config.SHARPEN
+    out = cv2.addWeighted(rgb, 1.0 + k, cv2.GaussianBlur(rgb, (3, 3), 0), -k, 0)
+    mask = cv2.erode(valid.astype(np.uint8), np.ones((3, 3), np.uint8))
+    cv2.copyTo(out, mask, rgb)
+    return rgb
 
 
 def _warp_grid(cog, tx0, ty0, tx1, ty1, size, scale, wc0, wr0):
@@ -128,8 +150,8 @@ def _warp_grid(cog, tx0, ty0, tx1, ty1, size, scale, wc0, wr0):
             X = tx0 + (tx1 - tx0) * (iu * (size - 1) / (_K - 1) + 0.5) / size
             lon, lat = crs.WEBMERCATOR.to_lonlat(X, Y)
             sx, sy = cog.crs.to_xy(lon, lat)
-            C[iv, iu] = (sx - cog.ox) / (cog.psx * scale) - wc0
-            R[iv, iu] = (cog.oy - sy) / (cog.psy * scale) - wr0
+            C[iv, iu] = (sx - cog.ox) / (cog.psx * scale) - wc0 - 0.5
+            R[iv, iu] = (cog.oy - sy) / (cog.psy * scale) - wr0 - 0.5
 
     p = np.linspace(0, _K - 1, size)
     i0 = np.clip(np.floor(p).astype(np.intp), 0, _K - 2)
