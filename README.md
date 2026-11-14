@@ -1,19 +1,17 @@
 # cog2tms
 
+[![AI:W WRITE](https://img.shields.io/badge/AI-WRITE-grey?style=flat&logoSize=auto&labelColor=13171f)](https://0rwx.com)
 [![ci](https://github.com/cquest/cog2tms/actions/workflows/ci.yml/badge.svg)](https://github.com/cquest/cog2tms/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/cquest/cog2tms/graph/badge.svg)](https://codecov.io/gh/cquest/cog2tms)
+![license: WTFPL](https://img.shields.io/badge/license-WTFPL-green)
+![python: 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)
+
+[Français](README_fr.md)
 
 Serve map tiles as TMS from a Cloud Optimized GeoTIFF (COG).
 
-Give it the URL of a COG, it reads the file remotely over HTTP byte-range requests
-(never the whole file — the demo files are 0.9–3.8 GB) and returns 256px XYZ
-(OSM scheme) tiles reprojected to EPSG:3857, whatever CRS the COG uses (French
-Lambert zones, UTM, WGS84, …; a CRS outside the supported subset returns `400`).
-
-A small pure-Python TIFF reader parses classic TIFF and BigTIFF: tiled layout,
-internal overviews, 1-bit internal masks, compressions None / Deflate / LZW /
-PackBits / ZSTD / JPEG-in-TIFF (imagecodecs and simplejpeg accelerate decoding,
-pure-Python and Pillow fallbacks).
+Give it the URL of a COG, it reads the file remotely and returns Z/X/Y
+(OSM scheme) tiles reprojected to EPSG:3857 (Web Mercator).
 
 ## API
 

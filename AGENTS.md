@@ -3,7 +3,9 @@
 COG URL in, **EPSG:3857 XYZ (OSM) tiles** out; pixels are fetched from the remote
 COG by **HTTP byte-range requests only** (never the whole file).
 **Language convention: all code, comments, docstrings, tests, commit messages and
-docs are in English.** Code style: **minimal, idiomatic, no over-engineering**.
+docs are in English** — exception: `README_fr.md` is a maintained French mirror of
+`README.md`; edit the two together, never let them drift.
+Code style: **minimal, idiomatic, no over-engineering**.
 
 ## API contract
 
