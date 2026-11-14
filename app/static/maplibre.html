@@ -39,6 +39,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .row code { flex: 1; font: 12px/1.4 ui-monospace, monospace; background: #f2f4f6; padding: 3px 6px;
             border-radius: 4px; overflow-wrap: anywhere; }
 .row button { background: #fff; color: var(--fg); border-color: var(--line); padding: 2px 8px; flex: none; }
+#josm-open img { width: 18px; height: 18px; margin-right: 6px; vertical-align: -4px; }
 #curtile { font: 13px ui-monospace, monospace; color: var(--mut); }
 .muted { color: var(--mut); }
 </style>
@@ -76,8 +77,8 @@ dd { margin: 0; overflow-wrap: anywhere; }
       <h3>TMS Tile URLs</h3>
       <div class="row"><code id="u-xyz"></code><button data-copy="u-xyz">copy</button></div>
       <h3>JOSM definition</h3>
-      <div class="row"><code id="u-josm"></code><button data-copy="u-josm">copy</button>
-        <button id="josm-open" title="add this layer to a running JOSM (Remote Control, port 8111)">open in JOSM</button></div>
+      <div class="row"><code id="u-josm"></code><button data-copy="u-josm">copy</button></div>
+      <div class="row"><button id="josm-open" title="add this layer to a running JOSM (Remote Control, port 8111)"><img src="/static/josm.svg" alt="">Load in JOSM</button></div>
     </section>
 
     <section id="info" hidden>
