@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'self'; worker-src blob:; connect-src 'self' tiles.openfreemap.org; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'">
+      content="default-src 'self'; worker-src blob:; connect-src 'self' tiles.openfreemap.org http://127.0.0.1:8111; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'">
 <title>cog2tms</title>
 <link rel="stylesheet" href="/static/maplibre-gl.css">
 <style>
@@ -76,7 +76,8 @@ dd { margin: 0; overflow-wrap: anywhere; }
       <h3>TMS Tile URLs</h3>
       <div class="row"><code id="u-xyz"></code><button data-copy="u-xyz">copy</button></div>
       <h3>JOSM definition</h3>
-      <div class="row"><code id="u-josm"></code><button data-copy="u-josm">copy</button></div>
+      <div class="row"><code id="u-josm"></code><button data-copy="u-josm">copy</button>
+        <button id="josm-open" title="add this layer to a running JOSM (Remote Control, port 8111)">open in JOSM</button></div>
     </section>
 
     <section id="info" hidden>

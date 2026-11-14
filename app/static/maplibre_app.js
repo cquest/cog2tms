@@ -116,6 +116,23 @@ function setUrls() {
   $("urls").hidden = false;
 }
 
+// JOSM Remote Control (/imagery adds a TMS layer on port 8111, feature off by
+// default in JOSM). url= must stay last: JOSM reads everything after it
+// literally, our query's '&' included. bounds = minlat,minlon,maxlat,maxlon.
+// no-cors fetch: only delivery matters, JOSM shows its own permission dialog.
+function openInJosm() {
+  if (!info) return;
+  const [w, s, e, n] = info.bbox;
+  fetch("http://127.0.0.1:8111/imagery?type=tms"
+      + "&title=" + encodeURIComponent("cog2tms " + cogUrl())
+      + `&bounds=${s},${w},${n},${e}`  // JOSM order: minlat,minlon,maxlat,maxlon
+      + `&min_zoom=${info.minzoom ?? 0}&max_zoom=${info.maxzoom ?? MAX_ZOOM}`
+      + "&url=" + tileTemplate(),
+      {mode: "no-cors"})
+    .catch(() => showError("JOSM not reachable on 127.0.0.1:8111 — enable "
+        + "Remote Control in JOSM Preferences (Expert settings)"));
+}
+
 function showError(msg) {
   const e = $("err");
   e.textContent = msg;
@@ -193,6 +210,7 @@ const syncFormatControls = () => {
 syncFormatControls();
 
 $("loadform").addEventListener("submit", (e) => { e.preventDefault(); load(); });
+$("josm-open").addEventListener("click", openInJosm);
 for (const f of FIELDS) $(f).addEventListener("change", () => {
   if (f === "format") syncFormatControls();  // before rebuild: disabled controls drop out of the urls
   if (info) { ensureOverlays(); setUrls(); share(); }
