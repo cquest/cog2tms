@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'self'; worker-src blob:; connect-src 'self' tiles.openfreemap.org; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'">
-<title>cog2tms — MapLibre preview</title>
+<title>cog2tms</title>
 <link rel="stylesheet" href="/static/maplibre-gl.css">
 <style>
 :root { --line: #d5d9de; --fg: #1c2530; --mut: #5b6672; --acc: #0b62ce; --err: #a4123f; }
@@ -45,7 +45,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
 </head>
 <body>
 <header>
-  <h1>cog2tms <small>MapLibre preview (vector basemap)</small></h1>
+  <h1>cog2tms <small>Serves map tiles as TMS from a Cloud Optimized GeoTIFF (COG).</small>
 </header>
 
 <form id="loadform">
@@ -55,14 +55,14 @@ dd { margin: 0; overflow-wrap: anywhere; }
 
 <div id="params">
   <label>format
-    <select id="format"><option>png</option><option>jpeg</option></select></label>
+    <select id="format"><option>auto</option><option>png</option><option>jpeg</option><option>webp</option></select></label>
   <label>quality <input id="quality" class="num" type="number" min="1" max="95" value="80"></label>
   <label>size
     <select id="size"><option>256</option><option>512</option></select></label>
   <label>blackmax <input id="blackmax" class="num" type="text" value="20"
          title="near-black pixels become transparent; -1 disables"></label>
-  <label hidden><input id="bidx" type="text" placeholder="1,2,3" size="6"></label>
-  <label hidden><input id="rescale" type="text" placeholder="min,max" size="10"></label>
+  <label hidden><input hidden id="bidx" type="text" placeholder="1,2,3" size="6"></label>
+  <label hidden><input hidden id="rescale" type="text" placeholder="min,max" size="10"></label>
   <label><input id="base" type="checkbox" checked> vector basemap (OpenFreeMap bright)</label>
   <label>opacity <input id="opacity" type="range" min="0" max="100" value="100"></label>
 </div>
@@ -88,7 +88,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
       <h2>Tile under cursor</h2>
       <span id="curtile">&mdash;</span>
     </section>
-      <p class="muted">XYZ numbering, Y points down (same as OSM/Leaflet); JOSM "tms:" form
+      <p class="muted">Z/X/Y numbering, Y points down (same as OSM/Leaflet); JOSM "tms:" form
       included. Only parameters differing from the service defaults appear in the URLs.</p>
   </aside>
 </main>

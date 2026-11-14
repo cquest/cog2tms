@@ -3,70 +3,64 @@
 Serve map tiles as TMS from a Cloud Optimized GeoTIFF (COG).
 
 Give it the URL of a COG, it reads the file remotely over HTTP byte-range requests
-(never the whole file — the demo files are 0.9–3.8 GB) and returns tiles as 256px
-XYZ (OSM scheme) tiles reprojected to EPSG:3857 (Web Mercator) — whatever CRS the
-COG uses (e.g. Lambert conformal conic French zones, UTM, WGS84).
+(never the whole file — the demo files are 0.9–3.8 GB) and returns 256px XYZ
+(OSM scheme) tiles reprojected to EPSG:3857, whatever CRS the COG uses (French
+Lambert zones, UTM, WGS84, …; a CRS outside the supported subset returns `400`).
 
-The COG is parsed by a small pure-Python TIFF reader (`app/geotiff.py`), fetched
-with `requests` + `Range:` headers, and pixels are warped/resampled by `cv2.remap`
-(opencv-python-headless, the only heavy dependency). Supported: classic TIFF and
-BigTIFF, tiled layout, internal overviews, compressions None/Deflate/LZW/PackBits/
-JPEG (JPEG-in-TIFF decoded by simplejpeg, Pillow fallback), 1-bit internal alpha
-masks, GeoTIFF tags, and a subset of CRSs (EPSG:4326, 3857, Lambert-93, Lambert
-CC42–CC46, UTM N/S, plus user-defined LCC/TM); other CRSs return `400`.
+A small pure-Python TIFF reader parses classic TIFF and BigTIFF: tiled layout,
+internal overviews, 1-bit internal masks, compressions None / Deflate / LZW /
+PackBits / ZSTD / JPEG-in-TIFF (imagecodecs and simplejpeg accelerate decoding,
+pure-Python and Pillow fallbacks).
 
 ## API
 
 ```
 GET /                                        # web UI (form + MapLibre preview, vector basemap)
 GET /static/…                                # web UI assets (vendored MapLibre, maplibre_app.js)
-GET /c2t/{z}/{x}/{y}?u=<COG url>[&format=png|jpeg][&quality=80][&size=256]
+GET /c2t/{z}/{x}/{y}?u=<COG url>[&format=png|jpeg|webp|auto][&quality=80][&size=256]
                       [&bidx=1,2,3][&rescale=min,max][&blackmax=0]
 GET /c2t/{z}/{x}/{y}.geojson?u=<COG url>   # COG footprint (debug)
 GET /c2t.tms.json?u=<COG url>              # TileJSON (bbox, minzoom/maxzoom)
 GET /healthz
 ```
 
-- Tile scheme: XYZ (OSM/Leaflet numbering, y-down), output PNG (RGBA, alpha 0
-  outside coverage) or JPEG (`quality`, solid `EMPTY_TILE_BG` outside coverage).
+- Tile scheme: XYZ (OSM/Leaflet numbering, y-down). Output PNG (RGBA), JPEG
+  (solid `EMPTY_TILE_BG` outside coverage) or WebP (≈13× smaller than PNG on
+  ortho tiles; `WEBP_LOSSLESS=1` for lossless WebP).
+- `format=auto` follows only the `Accept` header: webp when `image/webp` is
+  listed explicitly (q>0), else png. Wildcards (`image/*`, `*/*`) never select
+  webp — JOSM sends them and cannot decode it.
 - `blackmax=0..255`: pixels whose brightest band is ≤ this value (near-black,
-  typically the unmasked fringes at orthophoto edges) are treated as no-coverage.
-  Default `20` (env `BLACKMAX`); `-1` returns every pixel as rendered.
-- Tiles outside the COG footprint return `200` with an empty (transparent) tile.
-- `400` bad zoom / tile index / format / size / URL (also 16-bit data without
-  `rescale`, unsupported CRS, refused redirect chain); `404` COG unreachable or
+  typically the unmasked fringes at orthophoto edges) become no-coverage.
+  Default `20`; `-1` disables.
+- Tiles outside the COG footprint: `200` with an empty (transparent) tile.
+- Errors: `400` bad zoom / index / format / size / URL, 16-bit data without
+  `rescale`, unsupported CRS, refused redirect chain; `404` COG unreachable or
   not a GeoTIFF; `502` upstream error.
 
 ## Run locally
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-
 uvicorn app.main:app --reload --port 3857
 ```
 
-Fetch a tile (the example COG is a public drone orthophoto, EPSG:3943):
+The web UI at `http://127.0.0.1:3857/`: paste a COG URL, get a MapLibre preview
+and ready-to-paste tile URLs. Or straight from the shell (the example COG is a
+public drone orthophoto, EPSG:3943):
 
 ```bash
 curl -o tile.png \
   "http://127.0.0.1:3857/c2t/18/130034/95856?u=https://data.cquest.org/temp/cog4josm/COG_BayonneSudEst.tif"
 ```
 
-In JOSM (Preferences → Map paint settings → WMS/TMS sources → New WMS/TMS source,
-type `TMS`), add:
+In JOSM (Map paint settings → WMS/TMS sources → new `TMS` source) — JOSM's `{y}`
+is already top-down, no flip needed:
 
 ```
 tms:http://127.0.0.1:3857/c2t/{zoom}/{x}/{y}?u=https://data.cquest.org/temp/cog4josm/COG_BayonneSudEst.tif
 ```
-
-(JOSM's `{y}` is already top-down like this service — no `{-y}` flip needed.)
-
-## Web UI
-
-Open `http://127.0.0.1:3857/` in a browser: paste a COG URL and the page shows
-a preview map and ready-to-paste URLs.
 
 ## Tests
 
@@ -86,11 +80,11 @@ Measured on the Bayonne COG (875 MB, EPSG:3943) from a workstation:
 | first tile at max zoom (L0 block index) | no extra cost |
 | warm render (blocks cached) | ≈6 ms |
 | repeat of the same tile (tile cache) | ≈2 ms |
+| z18 tile encoding | PNG 103 KB, WebP 7.9 KB (≈13× smaller, ≈2 ms), JPEG 10 KB |
 
-The levers behind those numbers (bulk head prefetch, lazy block indexes,
-batched/parallel and multi-range fetches, `cv2.remap` warp, threaded simplejpeg
-block decode, LRU tile cache with single-flight locks) are detailed in
-[AGENTS.md](AGENTS.md).
+Levers (bulk head prefetch, lazy block indexes, merged/parallel/multi-range
+fetches, `cv2.remap` warp, threaded decode, LRU tile cache with single-flight
+locks): detailed in [AGENTS.md](AGENTS.md).
 
 ## Configuration (environment variables)
 
@@ -98,38 +92,35 @@ block decode, LRU tile cache with single-flight locks) are detailed in
 |---|---|---|
 | `MAX_ZOOM` | `24` | highest zoom level served |
 | `READER_TTL` | `600` | seconds an opened COG stays cached |
-| `POOL_SIZE` | `64` | max number of concurrently opened COGs |
+| `POOL_SIZE` | `64` | max concurrently opened COGs |
 | `MAX_CONCURRENT_READS` | `8` | max simultaneous tile renders |
 | `BLOCK_CACHE` | `1500` | decoded COG blocks kept per open COG |
-| `DECODE_THREADS` | `4` | threads decoding the blocks of a large window (`1` decodes inline; JPEG needs simplejpeg) |
+| `DECODE_THREADS` | `4` | threads decoding a large window's blocks (`1` decodes inline) |
 | `TILE_CACHE` | `1024` | encoded tiles kept in memory, LRU (`0` disables) |
 | `PNG_COMPRESS` | `1` | PNG deflate level (1 is ~4× faster than 6, ~13% bigger) |
+| `WEBP_LOSSLESS` | `0` | `1`: lossless+exact WebP (bit-identical to PNG, ~2× the lossy size) |
 | `MERGE_GAP` | `4096` | byte-ranges closer than this share one HTTP request |
-| `MULTIRANGE` | `1` | fetch several ranges in one GET (multipart/byteranges); rejection is remembered per host, never probed again |
-| `HEAD_PREFETCH` | `65536` | bulk head read (bytes) that absorbs IFD/tag parsing at open (`0` disables) |
+| `MULTIRANGE` | `1` | several ranges per GET (multipart/byteranges); rejection remembered per host |
+| `HEAD_PREFETCH` | `65536` | bulk head read (bytes) absorbing IFD/tag parsing at open (`0` disables) |
 | `HTTP_CONNECT_TIMEOUT` / `HTTP_READ_TIMEOUT` | `10` / `30` | upstream timeouts (s) |
-| `HTTP_RETRIES` / `HTTP_BACKOFF` | `2` / `0.3` | transparent retries on 429/5xx (Retry-After honored, exponential backoff); `0` disables |
-| `NEGATIVE_TTL` | `30` | seconds a remote 404/403 short-circuits further requests for that COG; `0` disables |
-| `VALIDATE_TTL` | `30` | seconds between two `If-Range` checks of a COG version (`-1` disables checks) |
-| `VALIDATE_TIMEOUT` | `5` | timeout (s) of that version check, which sits in front of a tile response |
-| `MAX_REDIRECTS` | `5` | 30x hops followed for a COG URL (each hop re-validated); `0` refuses any redirect |
+| `HTTP_RETRIES` / `HTTP_BACKOFF` | `2` / `0.3` | transparent retries on 429/5xx (`0` disables) |
+| `NEGATIVE_TTL` | `30` | a remote 404/403 short-circuits that COG for this long (`0` disables) |
+| `VALIDATE_TTL` | `30` | seconds between two `If-Range` version checks (`-1` disables) |
+| `VALIDATE_TIMEOUT` | `5` | timeout (s) of that version check |
+| `MAX_REDIRECTS` | `5` | 30x hops followed, each re-validated (`0` refuses redirects) |
 | `EMPTY_TILE_BG` | `0,0,0` | solid RGB used for empty JPEG tiles |
-| `BLACKMAX` | `20` | default near-black transparency threshold (`-1` disables; per-request `&blackmax=`) |
+| `BLACKMAX` | `20` | default near-black transparency threshold (`-1` disables) |
 | `ALLOWED_HOSTS` | — | if set, comma-separated COG host allowlist |
 
-Security, redirects, resilience and cache-coherence behavior in one line each
-(full mechanics in [AGENTS.md](AGENTS.md)):
-
-- **Anti-SSRF**: only `http(s)` COG URLs; targets resolving to private or reserved
-  IPs are rejected (dev/tests: `ALLOW_PRIVATE_NET=1`). Every `Location` of a 30x
-  chain is re-validated with the same rules before connecting.
-- **Resilience**: 429/5xx retried transparently (bounded, `Retry-After` honored);
-  a remote 404/403 remembered per URL for `NEGATIVE_TTL`; already-cached tiles
-  keep being served while upstream is down.
-- **Coherence**: the `ETag`/`Last-Modified`/size of each COG are remembered and
-  later requests carry `If-Range`; any drift drops the reader and all cached
-  tiles of that URL and the tile re-renders on the new version — a replacement's
-  whole-file 200 answer is never downloaded.
+- **Anti-SSRF**: only `http(s)` COG URLs; targets resolving to private or
+  reserved IPs are rejected (dev/tests: `ALLOW_PRIVATE_NET=1`); every `Location`
+  of a 30x chain is re-validated before connecting.
+- **Resilience**: 429/5xx retried transparently (`Retry-After` honored); remote
+  404/403 remembered per URL; cached tiles keep being served while upstream is
+  down.
+- **Coherence**: each COG's `ETag`/`Last-Modified`/size is anchored and later
+  requests carry `If-Range`; any drift drops that COG's reader and cached tiles
+  — a replacement's whole-file 200 answer is never downloaded.
 
 ## Docker
 
@@ -138,8 +129,4 @@ docker build -t cog2tms .
 docker run -p 3857:3857 cog2tms   # http://localhost:3857
 ```
 
-## Status
-
-MVP complete: PNG/JPEG tiles, overview selection, warp to 3857, empty tiles,
-TileJSON/GeoJSON footprints, URL validation, offline + network test suites.
-See [AGENTS.md](AGENTS.md) for the design notes and roadmap.
+Design notes, supported-CRS list and roadmap: [AGENTS.md](AGENTS.md).

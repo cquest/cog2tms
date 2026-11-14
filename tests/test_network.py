@@ -48,6 +48,28 @@ def test_out_of_bounds(client):
     assert (np.asarray(Image.open(io.BytesIO(r.content))) == 0).all()
 
 
+def test_auto_accept_negotiation_remote(client):
+    """format=auto on the real COG follows only the Accept header, whatever the
+    source codec: webp to a webp-capable browser (also for the empty tile),
+    png to a */* client (JOSM)."""
+    ch = {"Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"}
+    r = client.get(f"/c2t/18/130034/95856?u={COG_SMALL}&format=auto", headers=ch)
+    assert r.status_code == 200 and r.headers["content-type"] == "image/webp"
+    r = client.get(f"/c2t/18/130034/95856?u={COG_SMALL}&format=auto", headers={"Accept": "*/*"})
+    assert r.status_code == 200 and r.headers["content-type"] == "image/png"
+    r = client.get(f"/c2t/13/4000/2990?u={COG_SMALL}&format=auto", headers=ch)
+    assert r.status_code == 200 and r.headers["content-type"] == "image/webp"
+    assert np.asarray(Image.open(io.BytesIO(r.content)))[..., 3].max() == 0
+
+
+def test_webp_smaller_than_png(client):
+    """z18 ortho tile: explicit webp must be clearly smaller than the PNG."""
+    png = _t(client, f"/c2t/18/130034/95856?u={COG_SMALL}")
+    webp = _t(client, f"/c2t/18/130034/95856?u={COG_SMALL}&format=webp")
+    assert webp.status_code == 200 and webp.headers["content-type"] == "image/webp"
+    assert len(webp.content) * 2 < len(png.content)
+
+
 def test_edge_tile_transparent(client):
     """z13 tile 4064/2995 straddles the east edge of the (rotated) footprint:
     no pixel more than 2 tile-px outside the web bbox may be opaque — the old

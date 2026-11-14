@@ -24,9 +24,9 @@ function tileQuery() {
   const q = new URLSearchParams({u: cogUrl()});
   for (const f of FIELDS) {
     const el = $(f), v = el.value.trim();
-    // only non-default params appear (DEFAULTS = the service's documented
-    // ones); disabled controls (quality under png, blackmax under jpeg)
-    // never make it in
+    // only params differing from the SERVICE defaults (DEFAULTS) appear: the
+    // UI default "auto" format therefore shows up in urls, png does not;
+    // disabled controls (quality under png, blackmax under jpeg) never make it in
     if (el.disabled || v === DEFAULTS[f]) continue;
     q.set(f, v);
   }
@@ -129,7 +129,7 @@ function share() {
   if (cogUrl()) q.set("u", cogUrl());
   for (const f of FIELDS) {
     const el = $(f), v = el.value.trim();
-    if (el.disabled || v === DEFAULTS[f]) continue;
+    if (el.disabled || v === DEFAULTS[f]) continue;  // service defaults omitted
     q.set(f, v);
   }
   if (!$("base").checked) q.set("base", "0");
@@ -183,10 +183,11 @@ map = new maplibregl.Map({
 map.addControl(new maplibregl.NavigationControl({showCompass: false}), "top-right");
 map.on("style.load", ensureOverlays);  // re-add overlays after every setStyle
 
-// quality only means anything for jpeg; blackmax creates transparency, which
-// jpeg cannot express
+// quality applies to jpeg and webp (auto resolves to webp or png depending on
+// the browser's Accept header, so it stays useful under auto); blackmax
+// creates transparency, which only jpeg cannot express
 const syncFormatControls = () => {
-  $("quality").disabled = $("format").value !== "jpeg";
+  $("quality").disabled = $("format").value === "png";
   $("blackmax").disabled = $("format").value === "jpeg";
 };
 syncFormatControls();

@@ -9,12 +9,8 @@ dependencies = [
     "requests>=2.31",
     "pillow>=10",
     "numpy>=1.26",
-    # ~3x faster JPEG-in-TIFF decode than Pillow, pixel-identical, releases the GIL;
-    # small wheels (linux/mac/windows) and the code still works without it
     "simplejpeg>=1.6",
-    # warp: cv2.remap is ~12x faster than the numpy bilinear gather (the dominant
-    # render step) and releases the GIL; headless wheels, no system libraries —
-    # the biggest dependency (61 MB wheel), worth it for the render speed
+    "imagecodecs>=2024.1",
     "opencv-python-headless>=4.12",
 ]
 

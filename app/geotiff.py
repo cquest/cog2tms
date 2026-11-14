@@ -2,8 +2,9 @@
 
 Only the tags needed to read pixel windows by byte-range are parsed. Supported:
 little/big endian classic TIFF and BigTIFF, tiled layout, planar contig, no
-rotation; compressions None/Deflate/LZW/PackBits/JPEG (JPEG-in-TIFF blocks are
-spliced with JPEGTables then decoded by simplejpeg, Pillow as fallback).
+rotation; compressions None/Deflate/LZW/PackBits/ZSTD/JPEG (JPEG-in-TIFF blocks
+are spliced with JPEGTables then decoded by simplejpeg, Pillow as fallback; LZW,
+PackBits and ZSTD use imagecodecs, pure-Python decoders for LZW/PackBits).
 TileOffsets/TileByteCounts are fetched lazily, per overview level, so opening a
 COG stays cheap.
 """
@@ -22,6 +23,11 @@ try:  # ~3x faster than Pillow on JPEG-in-TIFF, same pixels, and releases the GI
     from simplejpeg import decode_jpeg as _sjpeg
 except ImportError:  # exotic platforms: Pillow only
     _sjpeg = None
+
+try:  # C decoders: PackBits ~15x faster than ours; imagecodecs also decodes the
+    import imagecodecs as _ic  # libtiff LZW variant that our reader would reject
+except ImportError:  # slim installs: the pure-Python decoders below take over
+    _ic = None
 
 
 class CogError(Exception):
@@ -61,7 +67,11 @@ def _threaded_decode(lvl: "_Level", n: int) -> bool:
         return False
     if lvl.compression in (6, 7):
         return _sjpeg is not None  # Pillow keeps the GIL while decoding JPEG
-    return lvl.compression in (8, 32946)  # zlib releases it; our LZW/PackBits are Python
+    if lvl.compression == 5:
+        return _ic is not None  # imagecodecs LZW releases the GIL, ours is Python
+    # zlib releases the GIL; imagecodecs PackBits and ZSTD do not (but are fast
+    # enough inline: a whole window of them decodes in around a millisecond)
+    return lvl.compression in (8, 32946)
 
 
 def _scalar(end, tags, code):
@@ -124,6 +134,25 @@ def _packbits_decode(raw: bytes) -> bytes:
             i += 2
         else:
             i += 1
+    return bytes(out)
+
+
+def _zstd_decode(raw: bytes) -> bytes:
+    """TIFF ZSTD (compression 50000): imagecodecs required. A block is one plain
+    zstd frame, or libtiff's strip arrays of segments each prefixed with its
+    big-endian compressed size; both decode to the same pixels."""
+    if _ic is None:
+        raise CogError("ZSTD compression requires imagecodecs")
+    if raw.startswith(b"\x28\xb5\x2f\xfd"):
+        return _ic.zstd_decode(raw)
+    out = bytearray()
+    i = 0
+    while i < len(raw):
+        n = int.from_bytes(raw[i:i + 4], "big")
+        if n <= 0 or i + 4 + n > len(raw):
+            raise CogError("truncated ZSTD block")
+        out += _ic.zstd_decode(raw[i + 4:i + 4 + n])
+        i += 4 + n
     return bytes(out)
 
 
@@ -430,9 +459,11 @@ class CogFile:
         elif comp in (8, 32946):
             buf = zlib.decompress(raw)
         elif comp == 5:
-            buf = _lzw_decode(raw)
+            buf = _ic.lzw_decode(raw) if _ic else _lzw_decode(raw)
         elif comp == 32773:
-            buf = _packbits_decode(raw)
+            buf = _ic.packbits_decode(raw) if _ic else _packbits_decode(raw)
+        elif comp == 50000:
+            buf = _zstd_decode(raw)
         else:
             raise CogError(f"unsupported compression {comp}")
         if lvl.bps == 1:  # masks: 1 bit per pixel, MSB-first

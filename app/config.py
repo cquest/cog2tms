@@ -45,6 +45,7 @@ TILE_CACHE = int(os.getenv("TILE_CACHE", "1024"))
 
 # PNG deflate level: 1 is ~4x faster than default 6 for ~13% bigger files
 PNG_COMPRESS = int(os.getenv("PNG_COMPRESS", "1"))
+WEBP_LOSSLESS = os.getenv("WEBP_LOSSLESS", "0") == "1"
 
 # fetch several ranges per GET (RFC 7233 multipart/byteranges); auto-disabled
 # per reader when a server rejects or ignores it (e.g. S3, nginx)

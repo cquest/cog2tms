@@ -13,6 +13,11 @@ import numpy as np
 import pytest
 from PIL import Image
 
+try:  # only used to write the ZSTD fixture
+    import imagecodecs as _ic
+except ImportError:
+    _ic = None
+
 os.environ["ALLOW_PRIVATE_NET"] = "1"  # fixture server is on loopback
 
 W = H = 512
@@ -52,7 +57,10 @@ def _tiles(arr, comp=8):
                 img.save(buf, "JPEG", quality=90)
                 blobs.append(buf.getvalue())
             else:
-                blobs.append(zlib.compress(np.ascontiguousarray(blk).tobytes()))
+                if comp == 50000:
+                    blobs.append(_ic.zstd_encode(np.ascontiguousarray(blk).tobytes()))
+                else:
+                    blobs.append(zlib.compress(np.ascontiguousarray(blk).tobytes()))
     return blobs
 
 
@@ -240,6 +248,9 @@ def fixtures_dir(tmp_path_factory):
               geographic=True, comp=7)
     write_cog(d / "cogjpeg1.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
               geographic=True, comp=7, samples=1)
+    if _ic is not None:
+        write_cog(d / "cogzstd.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+                  geographic=True, comp=50000)
     return d
 
 
@@ -275,6 +286,7 @@ COG4326 = "cog4326.tif"
 COG3857 = "cog3857.tif"
 COGJPEG = "cogjpeg.tif"  # same content, JPEG-in-TIFF blocks (compression 7)
 COGJPEG1 = "cogjpeg1.tif"  # same, single-band JPEG blocks
+COGZSTD = "cogzstd.tif"  # same content, ZSTD blocks (compression 50000)
 
 TILE_ZOOM = 14  # one tile covers the whole 4 km fixture footprint
 

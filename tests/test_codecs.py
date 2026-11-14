@@ -1,4 +1,5 @@
-"""Block decoders: JPEG-in-TIFF blocks, simplejpeg/Pillow parity, threaded window decode."""
+"""Block decoders: JPEG-in-TIFF blocks, simplejpeg/Pillow parity, imagecodecs
+LZW/PackBits/ZSTD, threaded window decode."""
 import threading
 
 import numpy as np
@@ -7,7 +8,7 @@ import pytest
 from app import geotiff as g
 from app import tiles
 from app.httprange import LocalReader
-from .conftest import COG4326, COGJPEG, COGJPEG1, fixture_tile
+from .conftest import COG4326, COGJPEG, COGJPEG1, COGZSTD, fixture_tile
 
 POOL = g._POOL  # the pool as configured, to put it back inside tests
 
@@ -81,7 +82,9 @@ def test_threaded_decode_needs_a_gil_free_codec_and_a_big_window():
     """Threads only pay off when the decoder releases the GIL and the window is big."""
     lvl = g._Level.__new__(g._Level)
     lvl.tilew = lvl.tileh = 512
-    for comp, expect in ((1, False), (5, False), (32773, False), (8, True), (32946, True)):
+    lzw_par = g._ic is not None  # imagecodecs LZW releases the GIL, ours is Python
+    for comp, expect in ((1, False), (5, lzw_par), (32773, False), (8, True),
+                         (32946, True), (50000, False)):
         lvl.compression = comp
         assert g._threaded_decode(lvl, 4) is expect
     lvl.compression = 7
@@ -90,6 +93,98 @@ def test_threaded_decode_needs_a_gil_free_codec_and_a_big_window():
     lvl.compression = 8
     lvl.tilew = lvl.tileh = 128
     assert not g._threaded_decode(lvl, 4)  # 64 kpx: inline decoding is cheaper
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_imagecodecs_lzw_and_packbits_blocks(monkeypatch):
+    """LZW/PackBits blocks decode through imagecodecs; byte-identical results."""
+    import imagecodecs as ic
+    rng = np.random.default_rng(3)
+    blk = np.ascontiguousarray(rng.integers(0, 256, (64, 64, 3), dtype=np.uint8))
+    cog = g.CogFile.__new__(g.CogFile)
+    blobs = {5: ic.lzw_encode(blk.tobytes()), 32773: ic.packbits_encode(blk.tobytes())}
+    for comp, raw in blobs.items():
+        a = cog._decode(_lvl(comp), raw)
+        assert (a == blk).all(), comp
+        if comp == 32773:  # TIFF PackBits is standard: our Python decoder too
+            monkeypatch.setattr(g, "_ic", None)
+            assert (cog._decode(_lvl(comp), raw) == blk).all()
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_lzw_decodes_libtiff_variant():
+    """GDAL/libtiff emit an LZW variant our pure-Python decoder rejects ("bad
+    LZW code"); imagecodecs reads it - the reason LZW decoding goes through it."""
+    import io
+    import struct
+    from PIL import Image
+    yy, xx = np.mgrid[:64, :64]
+    blk = np.dstack([(xx * 7) % 256, (yy * 13) % 256, np.full((64, 64), 90)]).astype(np.uint8)
+    buf = io.BytesIO()
+    Image.fromarray(blk).save(buf, "TIFF", compression="tiff_lzw")
+    tiff = buf.getvalue()
+    off = struct.unpack("<I", tiff[4:8])[0]
+    tags = {}
+    for i in range(struct.unpack("<H", tiff[off:off + 2])[0]):
+        e = tiff[off + 2 + 12 * i: off + 14 + 12 * i]
+        code, typ, cnt = struct.unpack("<HHI", e[:8])
+        tags[code] = (typ, cnt, e[8:12])
+    assert struct.unpack("<H", tags[259][2][:2])[0] == 5  # libtiff wrote LZW
+    ptr = struct.unpack("<I", tags[273][2])[0]  # one strip: the whole block
+    size = struct.unpack("<I", tags[279][2])[0]
+    cog = g.CogFile.__new__(g.CogFile)
+    assert (cog._decode(_lvl(5), tiff[ptr:ptr + size]) == blk).all()
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_zstd_fixture_renders(fixtures_dir):
+    """A ZSTD COG renders exactly like the deflate fixture (both lossless)."""
+    ref = _rgb_valid(*_render(fixtures_dir, COG4326))
+    zstd = _rgb_valid(*_render(fixtures_dir, COGZSTD))
+    assert (zstd == ref).all()
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_zstd_blocks(monkeypatch):
+    """Plain zstd frame blocks decode byte-exact; without imagecodecs the block
+    is refused (no pure-Python zstd decoder)."""
+    import imagecodecs as ic
+    rng = np.random.default_rng(4)
+    blk = np.ascontiguousarray(rng.integers(0, 256, (64, 64, 3), dtype=np.uint8))
+    cog = g.CogFile.__new__(g.CogFile)
+    assert (cog._decode(_lvl(50000), ic.zstd_encode(blk.tobytes())) == blk).all()
+    monkeypatch.setattr(g, "_ic", None)
+    with pytest.raises(g.CogError):
+        cog._decode(_lvl(50000), ic.zstd_encode(blk.tobytes()))
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_zstd_multisegment_blocks():
+    """libtiff writes big ZSTD strips as segments each prefixed with its
+    big-endian compressed size; they decode like a single frame."""
+    import imagecodecs as ic
+    rng = np.random.default_rng(5)
+    blk = np.ascontiguousarray(rng.integers(0, 256, (64, 64, 3), dtype=np.uint8))
+    frame = ic.zstd_encode(blk.tobytes())
+    two = blk.tobytes() + blk.tobytes()  # a block made of two equal halves
+    blob = len(frame).to_bytes(4, "big") + frame + len(frame).to_bytes(4, "big") + frame
+    assert g._zstd_decode(blob) == two
+    lvl = _lvl(50000)
+    lvl.tileh = 128  # two stacked 64-row segments = one 128x64 block
+    lvl.tilew = 64
+    cog = g.CogFile.__new__(g.CogFile)
+    a = cog._decode(lvl, blob)
+    assert a.shape == (128, 64, 3) and (a[:64] == blk).all() and (a[64:] == blk).all()
+    with pytest.raises(g.CogError):  # a mangled segment table must not read past the end
+        g._zstd_decode(len(frame).to_bytes(4, "big") + frame[:8])
+
+
+def _lvl(comp):
+    lvl = g._Level.__new__(g._Level)
+    lvl.tilew = lvl.tileh = 64
+    lvl.samples, lvl.bps, lvl.dtype, lvl.predictor = 3, 8, np.dtype("u1"), 0
+    lvl.compression = comp
+    return lvl
 
 
 @pytest.mark.skipif(g._POOL is None, reason="DECODE_THREADS=1")

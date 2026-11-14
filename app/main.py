@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import requests
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -30,7 +30,7 @@ pool = ReaderPool(config.POOL_SIZE, config.READER_TTL, config.MAX_CONCURRENT_REA
 _STATIC = Path(__file__).parent / "static"  # web UI: maplibre.html + vendored maplibre-gl
 app.mount("/static", StaticFiles(directory=_STATIC), name="static")
 
-MIME = {"png": "image/png", "jpeg": "image/jpeg"}
+MIME = {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}
 CACHE = {"Cache-Control": "public, max-age=86400"}
 _tiles_cache: OrderedDict[str, bytes] = OrderedDict()
 _inflight: dict[str, asyncio.Lock] = {}
@@ -129,17 +129,22 @@ async def footprint(z: int, x: int, y: int, u: str = Query(...)):
 @app.get("/c2t/{z}/{x}/{y}")
 async def tile(z: int, x: int, y: int, u: str = Query(...), format: str = "png",
                quality: int = 80, bidx: str | None = None, rescale: str | None = None,
-               blackmax: str | None = None, size: int = 256):
+               blackmax: str | None = None, size: int = 256, request: Request = None):
     if not 0 <= z <= config.MAX_ZOOM:
         raise HTTPException(400, "bad zoom")
     n = 1 << z
     if not (0 <= x < n and 0 <= y < n):
         raise HTTPException(400, "tile index outside matrix")
-    if format not in MIME:
+    if format not in MIME and format != "auto":
         raise HTTPException(400, "unsupported format")
     if not 1 <= size <= 1024:
         raise HTTPException(400, "bad size")
     quality = max(1, min(95, quality))
+    # format=auto depends only on the Accept header: webp if image/webp is
+    # explicitly listed with q>0, else png. Wildcards (image/*, */*: JOSM,
+    # plain HTTP clients) never select webp - JOSM cannot decode it.
+    if format == "auto":
+        format = "webp" if _accepts_webp(request.headers.get("accept", "")) else "png"
     key = f"{u}|{z}|{x}|{y}|{format}|{quality}|{size}|{bidx}|{rescale}|{blackmax}"
     # at most one 1-byte If-Range probe per VALIDATE_TTL and per COG: it drops
     # cached tiles and the open reader when the file was replaced under the URL
@@ -152,7 +157,8 @@ async def tile(z: int, x: int, y: int, u: str = Query(...), format: str = "png",
             async with lock:
                 blob = _tiles_cache.get(key)
                 if blob is None:
-                    blob = await _render_tile(u, z, x, y, format, quality, size, bidx, rescale, blackmax)
+                    blob = await _render_tile(u, z, x, y, format, quality, size,
+                                              bidx, rescale, blackmax)
                     if config.TILE_CACHE:
                         _tiles_cache[key] = blob
                         while len(_tiles_cache) > config.TILE_CACHE:
@@ -207,14 +213,39 @@ async def _render(u: str, z: int, x: int, y: int, format: str, quality: int,
         raise HTTPException(502, "COG vanished")
     except (CogFetch, requests.RequestException) as e:
         raise HTTPException(502, f"upstream error: {e}")
+    return _encode(rgb, valid, format, quality)
 
+
+def _accepts_webp(header: str) -> bool:
+    """Strict token match, q=0 skipped: image/* and */* deliberately do NOT
+    count - JOSM and plain HTTP clients send them but cannot decode webp."""
+    for tok in header.split(","):
+        parts = tok.strip().split(";")
+        if parts[0].lower() == "image/webp":
+            q = next((p.strip()[2:] for p in parts[1:] if p.strip().startswith("q=")), "1")
+            try:
+                if float(q) > 0:
+                    return True
+            except ValueError:
+                pass  # malformed q: the media type still matched
+    return False
+
+
+def _encode(rgb: np.ndarray, valid: np.ndarray, fmt: str, quality: int) -> bytes:
     buf = BytesIO()
-    if format == "png":
-        rgba = np.dstack([rgb, np.where(valid, 255, 0).astype(np.uint8)])
-        Image.fromarray(rgba).save(buf, "PNG", compress_level=config.PNG_COMPRESS)
-    else:
+    if fmt == "jpeg":  # no alpha: invalid pixels get the configured solid fill
         bg = np.array(config.EMPTY_TILE_BG, dtype=np.uint8)
         Image.fromarray(np.where(valid[..., None], rgb, bg)).save(buf, "JPEG", quality=quality)
+    else:
+        rgba = np.ascontiguousarray(np.dstack([rgb, np.where(valid, 255, 0).astype(np.uint8)]))
+        if fmt == "png":
+            Image.fromarray(rgba).save(buf, "PNG", compress_level=config.PNG_COMPRESS)
+        else:
+            # exact=True keeps RGB where alpha=0 (Pillow would blend a background);
+            # method 0: 4 ms, method 4 buys 1 % bytes for 3x the time
+            kw = dict(lossless=True, exact=True) if config.WEBP_LOSSLESS \
+                else dict(quality=quality, method=0, exact=True)
+            Image.fromarray(rgba).save(buf, "WEBP", **kw)
     return buf.getvalue()
 
 
