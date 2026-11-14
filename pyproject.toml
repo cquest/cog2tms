@@ -16,11 +16,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "httpx"]
+dev = ["pytest", "pytest-cov", "httpx"]
 
 [tool.pytest.ini_options]
 addopts = "-m 'not network'"
 markers = ["network: integration tests on remote COGs"]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+exclude_also = ["except ImportError:"]  # codec fallback paths need the wheel absent
+fail_under = 75  # measured offline: 78% (offline+network: 82%) — retune up as tests grow
 
 [build-system]
 requires = ["hatchling"]

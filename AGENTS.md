@@ -32,7 +32,7 @@ or looping), `404` (unreachable COG, not a GeoTIFF), `502` (upstream error).
 | Size limit | **No 413 based on Content-Length** (multi-GB COGs are legitimate): validation via magic bytes `II*`/`MM*` + `MAX_ZOOM`. |
 
 Stack: Python 3.12, FastAPI + uvicorn, requests (Range reads), numpy, Pillow,
-simplejpeg, imagecodecs, opencv-python-headless; dev: pytest + httpx.
+simplejpeg, imagecodecs, opencv-python-headless; dev: pytest + pytest-cov + httpx.
 
 ## Supported COG features (`app/geotiff.py`)
 
@@ -120,7 +120,7 @@ would oversubscribe across uvicorn workers.
 ```
 cog2tms/
 ├── AGENTS.md
-├── pyproject.toml         # fastapi, uvicorn[standard], requests, pillow, numpy, simplejpeg, imagecodecs, opencv-python-headless ; dev: pytest, httpx
+├── pyproject.toml         # fastapi, uvicorn[standard], requests, pillow, numpy, simplejpeg, imagecodecs, opencv-python-headless ; dev: pytest, pytest-cov, httpx
 ├── app/
 │   ├── main.py            # routes + error mapping + format negotiation + TileJSON + geojson + CORS
 │   ├── cogpool.py         # LRU/TTL pool of open CogFile + render semaphore

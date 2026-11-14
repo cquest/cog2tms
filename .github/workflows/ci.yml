@@ -1,0 +1,19 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      # the network marker stays excluded (default addopts): those tests need
+      # the public cog4josm files, which can't be a CI dependency
+      - run: pytest --cov --cov-report=xml
+      - uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml

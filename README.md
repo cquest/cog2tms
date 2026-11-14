@@ -1,5 +1,8 @@
 # cog2tms
 
+[![ci](https://github.com/cquest/cog2tms/actions/workflows/ci.yml/badge.svg)](https://github.com/cquest/cog2tms/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/cquest/cog2tms/graph/badge.svg)](https://codecov.io/gh/cquest/cog2tms)
+
 Serve map tiles as TMS from a Cloud Optimized GeoTIFF (COG).
 
 Give it the URL of a COG, it reads the file remotely over HTTP byte-range requests
@@ -67,6 +70,7 @@ tms:http://127.0.0.1:3857/c2t/{zoom}/{x}/{y}?u=https://data.cquest.org/temp/cog4
 ```bash
 pytest              # offline: fixture COGs written in-process and served locally
 pytest -m network   # integration on the public cog4josm COGs
+pytest --cov        # branch coverage of app/ (threshold enforced, see pyproject)
 ```
 
 ## Performance
