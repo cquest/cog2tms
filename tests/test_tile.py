@@ -11,6 +11,17 @@ def test_healthz(client):
     assert client.get("/healthz").json() == {"status": "ok"}
 
 
+def test_anti_scraping(client, server):
+    r = client.get("/robots.txt")
+    assert r.status_code == 200 and r.headers["content-type"] == "text/plain; charset=utf-8"
+    assert "User-agent: *" in r.text and "Disallow: /c2t" in r.text
+    # robots.txt alone would not cover tile urls (images): every response is
+    # tagged so well-behaved crawlers keep out of the whole service
+    z, x, y = fixture_tile()
+    for path in ("/", "/healthz", tile_url(server, COG4326, z, x, y)):
+        assert client.get(path).headers["x-robots-tag"] == "nofollow, noimageindex"
+
+
 def test_web_ui(client):
     r = client.get("/")
     assert r.status_code == 200 and r.headers["content-type"] == "text/html; charset=utf-8"

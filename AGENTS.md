@@ -17,6 +17,8 @@ GET /c2t/{z}/{x}/{y}?u=<cog url>         tile: format=png|jpeg|webp|auto, qualit
 GET /c2t/{z}/{x}/{y}.geojson?u=…         COG footprint ring (debug)
 GET /c2t.tms.json?u=…                    TileJSON (bbox, minzoom/maxzoom)
 GET /healthz
+GET /robots.txt                          "User-agent: * Disallow: /c2t" + X-Robots-Tag
+                                         (nofollow, noimageindex) on every response
 ```
 
 Errors: `400` (zoom/x/y outside matrix, format, size, URL/scheme, bidx/rescale/
@@ -135,7 +137,8 @@ cog2tms/
 │   ├── empty.py           # memoized empty PNG/JPEG/WebP tiles
 │   ├── config.py          # settings from env
 │   ├── security.py        # URL validation (scheme + anti-SSRF + allowlist)
-│   └── static/            # web UI: maplibre.html + maplibre_app.js + vendored maplibre-gl (js/css)
+│   └── static/            # web UI: maplibre.html + maplibre_app.js + vendored maplibre-gl
+│                          # (js/css) + josm.svg + robots.txt (served at /robots.txt)
 ├── tests/
 │   ├── conftest.py        # pure-Python COG writer + Range server with byte counter
 │   ├── test_tile.py       # offline unit tests

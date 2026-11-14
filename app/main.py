@@ -25,6 +25,17 @@ from .tiles import EmptyTile, MissingRescale, web_bbox_lonlat
 
 app = FastAPI(title="cog2tms", version=version)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"])
+
+
+@app.middleware("http")
+async def _no_index(request: Request, call_next):
+    """robots.txt alone would not cover tile urls (they are images): tag every
+    response so well-behaved crawlers keep out of the whole service."""
+    resp = await call_next(request)
+    resp.headers["X-Robots-Tag"] = "nofollow, noimageindex"
+    return resp
+
+
 pool = ReaderPool(config.POOL_SIZE, config.READER_TTL, config.MAX_CONCURRENT_READS)
 
 _STATIC = Path(__file__).parent / "static"  # web UI: maplibre.html + vendored maplibre-gl
@@ -278,3 +289,8 @@ async def maplibre():
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}
+
+
+@app.get("/robots.txt")
+async def robots():
+    return FileResponse(_STATIC / "robots.txt", media_type="text/plain")

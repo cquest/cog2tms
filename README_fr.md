@@ -24,6 +24,7 @@ GET /c2t/{z}/{x}/{y}?u=<url du COG>[&format=png|jpeg|webp|auto][&quality=80][&si
 GET /c2t/{z}/{x}/{y}.geojson?u=<url du COG>  # emprise du COG (debug)
 GET /c2t.tms.json?u=<url du COG>             # TileJSON (bbox, minzoom/maxzoom)
 GET /healthz
+GET /robots.txt
 ```
 
 - Schéma de tuiles : XYZ (numérotation OSM/Leaflet, y vers le bas). Sortie PNG
@@ -40,6 +41,10 @@ GET /healthz
 - Erreurs : `400` zoom / indice / format / taille / URL invalides, données
   16 bits sans `rescale`, SCR non pris en charge, chaîne de redirections
   refusée ; `404` COG injoignable ou pas un GeoTIFF ; `502` erreur en amont.
+- Anti-extraction : `robots.txt` interdit l'API de tuiles (`/c2t`) et chaque
+  réponse porte `X-Robots-Tag: nofollow, noimageindex` — les URLs de tuiles
+  sont des images que robots.txt seul ne couvrirait pas. (Dissuade les bons
+  robots, pas les scrapers.)
 
 ## Lancer en local
 

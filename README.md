@@ -23,6 +23,7 @@ GET /c2t/{z}/{x}/{y}?u=<COG url>[&format=png|jpeg|webp|auto][&quality=80][&size=
 GET /c2t/{z}/{x}/{y}.geojson?u=<COG url>   # COG footprint (debug)
 GET /c2t.tms.json?u=<COG url>              # TileJSON (bbox, minzoom/maxzoom)
 GET /healthz
+GET /robots.txt
 ```
 
 - Tile scheme: XYZ (OSM/Leaflet numbering, y-down). Output PNG (RGBA), JPEG
@@ -38,6 +39,10 @@ GET /healthz
 - Errors: `400` bad zoom / index / format / size / URL, 16-bit data without
   `rescale`, unsupported CRS, refused redirect chain; `404` COG unreachable or
   not a GeoTIFF; `502` upstream error.
+- Anti-scraping: `robots.txt` disallows the tile API (`/c2t`) and every
+  response carries `X-Robots-Tag: nofollow, noimageindex` — tile urls are
+  images that robots.txt alone would not cover. (Deters well-behaved crawlers
+  only, not scrapers.)
 
 ## Run locally
 
