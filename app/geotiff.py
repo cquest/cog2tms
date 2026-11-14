@@ -2,9 +2,11 @@
 
 Only the tags needed to read pixel windows by byte-range are parsed. Supported:
 little/big endian classic TIFF and BigTIFF, tiled layout, planar contig, no
-rotation; compressions None/Deflate/LZW/PackBits/ZSTD/JPEG (JPEG-in-TIFF blocks
-are spliced with JPEGTables then decoded by simplejpeg, Pillow as fallback; LZW,
-PackBits and ZSTD use imagecodecs, pure-Python decoders for LZW/PackBits).
+rotation; compressions None/Deflate/LZW/PackBits/ZSTD/JPEG/WebP (JPEG-in-TIFF
+blocks are spliced with JPEGTables then decoded by simplejpeg, Pillow as
+fallback; WebP-in-TIFF blocks are whole RIFF/WEBP images decoded by
+imagecodecs, Pillow as fallback; LZW, PackBits and ZSTD use imagecodecs,
+pure-Python decoders for LZW/PackBits).
 TileOffsets/TileByteCounts are fetched lazily, per overview level, so opening a
 COG stays cheap.
 """
@@ -43,6 +45,7 @@ _SAMPLES, _EXTRA, _PLANAR = 277, 338, 284
 _TILEW, _TILEH, _TILOFFS, _TILCNTS, _PREDICTOR = 322, 323, 324, 325, 317
 _TIEPOINT, _SCALE, _MODELTRANSF = 33922, 33550, 34264
 _SUBIFDS = 330  # alternate overview layout: IFD offsets here, chain not used
+_WEBP = 50001  # libtiff's WebP codec id: each block is a whole RIFF/WEBP image
 _GEOKEYS, _GEODOUBLE, _JPEGTABLES, _GDAL_NODATA = 34735, 34736, 347, 42113
 
 _DT = {8: "u1", 16: "u2", 32: "u4"}
@@ -70,6 +73,8 @@ def _threaded_decode(lvl: "_Level", n: int) -> bool:
         return _sjpeg is not None  # Pillow keeps the GIL while decoding JPEG
     if lvl.compression == 5:
         return _ic is not None  # imagecodecs LZW releases the GIL, ours is Python
+    if lvl.compression == _WEBP:
+        return _ic is not None  # libwebp (imagecodecs) releases the GIL, Pillow not
     # zlib releases the GIL; imagecodecs PackBits and ZSTD do not (but are fast
     # enough inline: a whole window of them decodes in around a millisecond)
     return lvl.compression in (8, 32946)
@@ -176,6 +181,10 @@ class _Level:
             raise CogError("not a tiled GeoTIFF")
         if self.planar != 1:
             raise CogError("planarconfig separate not supported")
+        if self.compression == _WEBP and (self.bps != 8 or self.samples not in (3, 4)
+                                          or self.photometric != 2):
+            # libwebp only decodes whole 8-bit RGB/RGBA images (what GDAL writes)
+            raise CogError("WebP blocks must be 8-bit RGB/RGBA")
         if _TILOFFS not in tags or _TILCNTS not in tags:
             raise CogError("missing TileOffsets/TileByteCounts")
         self._lazy = (_TILOFFS, _TILCNTS)
@@ -475,6 +484,8 @@ class CogFile:
             if a.shape[2] not in (s, 1):
                 raise CogError(f"unexpected JPEG band count {a.shape[2]}")
             return a
+        if comp == _WEBP:
+            return self._decode_webp(raw, th, tw, s)
         if comp == 1:
             buf = raw
         elif comp in (8, 32946):
@@ -501,6 +512,35 @@ class CogFile:
                 a = np.cumsum(a, axis=1, dtype=np.uint16)
             else:
                 raise CogError("unsupported predictor/bit depth")
+        return a
+
+    @staticmethod
+    def _decode_webp(raw: bytes, th: int, tw: int, samples: int) -> np.ndarray:
+        # TIFF WebP (libtiff id 50001): each block is a whole RIFF/WEBP image
+        # (edges are encoded padded to the full tile size, like JPEG-in-TIFF).
+        # Straight alpha, never premultiplied; pixels match GDAL/libwebp reads.
+        if _ic is not None:
+            try:
+                a = _ic.webp_decode(raw)
+            except Exception:  # imagecodecs raises a dozen codec-specific types
+                raise CogError("cannot decode WebP block") from None
+        else:  # Pillow fallback: needs a build with libwebp
+            try:
+                a = np.asarray(Image.open(BytesIO(raw)))
+            except Exception:
+                raise CogError("WebP blocks require imagecodecs "
+                               "or a Pillow built with libwebp") from None
+        if a.ndim == 2:
+            a = a[..., None]
+        if samples == 4 and a.shape[2] == 3:
+            # libwebp drops a fully opaque alpha plane at encode time
+            a = np.dstack([a, np.full(a.shape[:2], 255, np.uint8)])
+        if a.shape[0] > th or a.shape[1] > tw or a.shape[2] != samples:
+            raise CogError(f"unexpected WebP block shape {a.shape}")
+        if a.shape[0] != th or a.shape[1] != tw:  # writer shrank the edge block
+            pad = np.zeros((th, tw, samples), np.uint8)
+            pad[: a.shape[0], : a.shape[1]] = a
+            a = pad
         return a
 
     @staticmethod

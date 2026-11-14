@@ -43,6 +43,10 @@ simplejpeg, imagecodecs, opencv-python-headless; dev: pytest + pytest-cov + http
 
 - Classic TIFF + BigTIFF; tiled layout, planar contig, no rotation.
 - Compressions: None, Deflate (+predictor 2), LZW, PackBits, **ZSTD (50000)**,
+  **WEBP (50001)** — each block is one whole RIFF/WEBP image, padded to the
+  full tile at edges like JPEG; 8-bit RGB/RGBA only (else refused at open),
+  straight (never premultiplied) alpha, decoded by imagecodecs/libwebp with a
+  Pillow fallback — pixels identical to GDAL/libwebp,
   **old-style JPEG**: blocks lack DQT/DHT → splice IFD `JPEGTables` (minus
   trailing EOI) + block body (GDAL recipe), then simplejpeg (`colorspace="RGB"`,
   `"GRAY"` for 1-sample levels; Pillow fallback). LZW/PackBits go through
@@ -90,9 +94,11 @@ would oversubscribe across uvicorn workers.
   **multi-range GET** (`multipart/byteranges`) — rejection remembered per host.
 - **Encoded-tile LRU** (`TILE_CACHE`) + per-key `asyncio.Lock` single-flight.
 - **Block decode in `_POOL`** (`DECODE_THREADS`, gated by `_PAR_MIN_PX` = 1 Mpx):
-  works for GIL-free codecs (simplejpeg, zlib, imagecodecs LZW); Pillow,
+  works for GIL-free codecs (simplejpeg, zlib, imagecodecs LZW and WebP —
+  libwebp releases the GIL); Pillow (JPEG or WebP when imagecodecs is absent),
   imagecodecs PackBits (9 µs/128² block) and ZSTD (53 µs) stay inline but are
-  fast enough.
+  fast enough; libwebp itself is heavier (≈0.3–0.9 ms/128² block) but only a
+  handful of blocks decode per tile.
 - **Warp = `cv2.remap`** of premultiplied `data*valid` + `valid` + renorm
   (≈1.4–2 ms per 256² tile vs 16–18 ms for the numpy gather; a dependency-free
   numpy rewrite only reaches ≈11 ms — this is why the opencv wheel is kept).
@@ -178,6 +184,7 @@ version checks; `MULTIRANGE=0` forces single ranges.
 COG_SMALL  = "https://data.cquest.org/temp/cog4josm/COG_BayonneSudEst.tif"   # 875 MB
 COG_BIG    = "https://data.cquest.org/temp/cog4josm/Anglet2025_COG.tif"      # 3.8 GB (BigTIFF + masks)
 COG_MERGED = "https://data.cquest.org/temp/cog4josm/COG_Bayonne_2025b.tif"   # 5.9 GB (cog_merger union)
+COG_WEBP   = "https://data.cquest.org/temp/cog4josm/Test_webp.tif"           # 6.8 MB (WebP 50001)
 COG_CENTER = (-1.421406, 43.465922)   # west of Bayonne
 ```
 
@@ -187,6 +194,7 @@ COG_CENTER = (-1.421406, 43.465922)   # west of Bayonne
 | Anglet2025_COG.tif | 3.8 GB | **BigTIFF**, JPEG, 10 levels + **1-bit masks** | EPSG:3943 | very-large-file stress test |
 | COG_Bayonne{NordEst,NordOuest,SudOuest}.tif | 1.5–1.7 GB | classic TIFF | EPSG:3943 | 4-tile footprint seam |
 | COG_Bayonne_2025b.tif | 5.9 GB | **BigTIFF**, JPEG, 8 overviews as **SubIFDs** | EPSG:3943 | `cog_merger` union of the 4 Bayonne COGs: count-0 hole blocks (SE notch), 34 MB TileOffsets arrays (slice path) |
+| Test_webp.tif | 6.8 MB | classic TIFF, **WebP (50001)** VP8, 512×512 blocks, 7 levels | EPSG:3943 | 571 m footprint (8192² @ 7 cm); center `18/130009/95839`, GDAL parity 0, z18 MSE 8.4 vs COG_SMALL |
 
 Verified: server advertises `Accept-Ranges: bytes`; opaque RGB without NoData on Bayonne;
 4.8 cm/px GSD → useful zoom ~17–19. Tiles over `COG_CENTER`: `13/4063/2995`,
@@ -203,6 +211,7 @@ blackmax, opaque black with `blackmax=-1`).
 Fixtures written **in pure Python by conftest** (tiled TIFF + internal 2×
 overview + GeoTIFF tags): EPSG:4326 and EPSG:3857 COGs with identical content,
 JPEG-in-TIFF, single-band JPEG, LZW (both dialects)/PackBits/ZSTD/predictor-2,
+lossless + lossy **WebP** blocks (RGB, RGBA+alpha, single-band refused),
 16-bit single band, GDAL_NODATA, ExtraSamples alpha, 1-bit internal mask,
 ModelTransformation, unsupported CRS, SubIFD-published overviews (empty chain),
 count-0 merger-hole blocks (bogus past-EOF offsets), a non-TIFF file — served
@@ -248,7 +257,12 @@ by a local Range-capable HTTP server that counts bytes. Pinned behaviors (do not
   byte-exact, including the **libtiff LZW variant** (our pure-Python decoder
   rejects it — pinned); predictor 2 bit-identical to plain deflate; **ZSTD**
   byte-identical to deflate, plain frame + size-prefixed segment blocks, no
-  imagecodecs → CogError; pooled decode byte-identical to inline;
+  imagecodecs → CogError; **WEBP** lossless byte-identical to deflate, lossy
+  within tolerance (flat fixture: mean < 2, max < 16), RGBA straight alpha
+  drives `valid`, libwebp's all-opaque-alpha plane drop is backfilled with
+  255, Pillow fallback identical, shrunken edge blocks padded to the full
+  tile, garbage blocks → `CogError`, 1-band WebP levels refused at open (404);
+  pooled decode byte-identical to inline;
   `_threaded_decode` gating (GIL-free codec + ≥1 Mpx); the pure-Python fallbacks
   tested directly: `_packbits_decode` golden byte sequences, `_lzw_decode`
   round-trips against the conftest mirror-encoder (width changes + clear-code
@@ -272,6 +286,9 @@ by a local Range-capable HTTP server that counts bytes. Pinned behaviors (do not
   png bytes; edge tile `13/4064/2995` → no opaque pixel >2 tile-px outside the
   web bbox; TileJSON bbox ≈ footprint; GeoJSON ring closed; COG_BIG z17 → 200
   with coverage (mask applied);
+- **webp COG** (COG_WEBP = Test_webp.tif, compression 50001): z18 center tile
+  non-empty and MSE < 40 vs the JPEG COG of the same area (two lossy codecs,
+  measured 8.4); footprint-straddling z16 tile keeps > 25k opaque px;
 - **merged COG** (COG_MERGED, `cog_merger` union of the 4 Bayonne files):
   overview tiles render (SubIFDs found), notch tile fully transparent
   (count-0 holes), adjacent black-fringe tile transparent by default and

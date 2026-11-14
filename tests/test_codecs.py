@@ -1,5 +1,5 @@
 """Block decoders: JPEG-in-TIFF blocks, simplejpeg/Pillow parity, imagecodecs
-LZW/PackBits/ZSTD, threaded window decode."""
+LZW/PackBits/ZSTD/WebP, threaded window decode."""
 import threading
 
 import numpy as np
@@ -8,8 +8,9 @@ import pytest
 from app import geotiff as g
 from app import tiles
 from app.httprange import LocalReader
-from .conftest import (COG4326, COGLZW, COGLZWLIB, COGJPEG, COGJPEG1, COGPACK,
-                       COGPRED, COGZSTD, fixture_tile)
+from .conftest import (COG4326, COGALPHA, COGLZW, COGLZWLIB, COGJPEG, COGJPEG1,
+                       COGPACK, COGPRED, COGWEBP, COGWEBPA, COGWEBPL, COGZSTD,
+                       fixture_tile)
 
 POOL = g._POOL  # the pool as configured, to put it back inside tests
 
@@ -71,7 +72,10 @@ def test_simplejpeg_matches_pillow(fixtures_dir, monkeypatch):
 def test_threaded_decode_matches_inline(fixtures_dir, monkeypatch):
     """Decoding blocks in threads gives byte-identical windows."""
     monkeypatch.setattr(g, "_PAR_MIN_PX", 0)  # the fixture windows are small
-    for name in (COG4326, COGJPEG):  # deflate, and JPEG when simplejpeg is present
+    names = (COG4326, COGJPEG)  # deflate, and JPEG when simplejpeg is present
+    if g._ic is not None:
+        names += (COGWEBP,)  # lossless WebP, imagecodecs (the pool-eligible path)
+    for name in names:
         monkeypatch.setattr(g, "_POOL", None)
         inline = _rgb_valid(*_render(fixtures_dir, name))
         monkeypatch.setattr(g, "_POOL", POOL)
@@ -84,8 +88,9 @@ def test_threaded_decode_needs_a_gil_free_codec_and_a_big_window():
     lvl = g._Level.__new__(g._Level)
     lvl.tilew = lvl.tileh = 512
     lzw_par = g._ic is not None  # imagecodecs LZW releases the GIL, ours is Python
+    webp_par = g._ic is not None  # libwebp in imagecodecs releases the GIL
     for comp, expect in ((1, False), (5, lzw_par), (32773, False), (8, True),
-                         (32946, True), (50000, False)):
+                         (32946, True), (50000, False), (50001, webp_par)):
         lvl.compression = comp
         assert g._threaded_decode(lvl, 4) is expect
     lvl.compression = 7
@@ -178,6 +183,81 @@ def test_zstd_multisegment_blocks():
     assert a.shape == (128, 64, 3) and (a[:64] == blk).all() and (a[64:] == blk).all()
     with pytest.raises(g.CogError):  # a mangled segment table must not read past the end
         g._zstd_decode(len(frame).to_bytes(4, "big") + frame[:8])
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_webp_lossless_fixture_renders(fixtures_dir):
+    """A lossless-WebP COG renders bit-identical to the deflate fixture:
+    blocks are whole RIFF/WEBP images, VP8L preserves RGB exactly."""
+    ref = _rgb_valid(*_render(fixtures_dir, COG4326))
+    assert (_rgb_valid(*_render(fixtures_dir, COGWEBP)) == ref).all()
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_webp_lossy_fixture_renders(fixtures_dir):
+    """Lossy WebP blocks (VP8, internal 4:2:0 YUV) render close to the deflate
+    fixture; the flat-color fixture keeps the drift small (measured: 0.6 / 6).
+    Blocks are also 35x smaller than deflate on that pattern."""
+    ref, refv = _render(fixtures_dir, COG4326)
+    rgb, valid = _render(fixtures_dir, COGWEBPL)
+    assert valid.sum() == refv.sum() > 0
+    diff = np.abs(rgb.astype(int) - ref.astype(int))
+    assert diff.mean() < 2 and diff.max() < 16
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_webp_rgba_fixture(fixtures_dir):
+    """RGBA WebP + ExtraSamples: straight (never premultiplied) alpha drives
+    coverage exactly like the deflate RGBA fixture."""
+    ref = _rgb_valid(*_render(fixtures_dir, COGALPHA))
+    assert (_rgb_valid(*_render(fixtures_dir, COGWEBPA)) == ref).all()
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_webp_opaque_alpha_backfill():
+    """libwebp drops a fully opaque alpha plane at encode time: the decoder
+    hands back 3 bands for a 4-sample level, 255 fills the hole."""
+    import imagecodecs as ic
+    rng = np.random.default_rng(6)
+    blk = np.ascontiguousarray(rng.integers(0, 256, (64, 64, 3), dtype=np.uint8))
+    rgba = np.dstack([blk, np.full((64, 64), 255, np.uint8)])
+    lvl = _lvl(50001)
+    lvl.samples = 4
+    a = g.CogFile.__new__(g.CogFile)._decode(lvl, ic.webp_encode(rgba, lossless=True))
+    assert a.shape == (64, 64, 4) and (a == rgba).all()
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_webp_shrunken_and_oversize_blocks():
+    """An edge block written at shrunken size (not libtiff's padded full tile)
+    is padded out to the tile; a block bigger than its tile is refused."""
+    import imagecodecs as ic
+    rng = np.random.default_rng(7)
+    blk = np.ascontiguousarray(rng.integers(0, 256, (40, 64, 3), dtype=np.uint8))
+    raw = ic.webp_encode(blk, lossless=True)
+    a = g.CogFile.__new__(g.CogFile)._decode(_lvl(50001), raw)  # 64x64 tile
+    assert a.shape == (64, 64, 3) and (a[:40] == blk).all() and not a[40:].any()
+    small = _lvl(50001)
+    small.tilew = small.tileh = 32
+    with pytest.raises(g.CogError, match="WebP block shape"):
+        g.CogFile.__new__(g.CogFile)._decode(small, raw)
+
+
+def test_webp_garbage_block():
+    """Undecodable WebP bytes must surface as a CogError, not leak a decoder
+    exception type (the endpoint maps it to a clean 502)."""
+    with pytest.raises(g.CogError, match="WebP"):
+        g.CogFile.__new__(g.CogFile)._decode(_lvl(50001), b"RIFF\x04\x00\x00\x00WEBPx")
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_webp_pillow_fallback(fixtures_dir, monkeypatch):
+    """Without imagecodecs, Pillow's libwebp decodes the same blocks to the
+    same pixels (and the window stays decoded inline: Pillow keeps the GIL)."""
+    ics = _rgb_valid(*_render(fixtures_dir, COGWEBP))
+    monkeypatch.setattr(g, "_ic", None)
+    pil = _rgb_valid(*_render(fixtures_dir, COGWEBP))
+    assert (ics == pil).all()
 
 
 def test_pure_packbits_decode_golden():

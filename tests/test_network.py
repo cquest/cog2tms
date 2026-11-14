@@ -12,6 +12,7 @@ pytestmark = pytest.mark.network
 COG_SMALL = "https://data.cquest.org/temp/cog4josm/COG_BayonneSudEst.tif"
 COG_BIG = "https://data.cquest.org/temp/cog4josm/Anglet2025_COG.tif"
 COG_MERGED = "https://data.cquest.org/temp/cog4josm/COG_Bayonne_2025b.tif"
+COG_WEBP = "https://data.cquest.org/temp/cog4josm/Test_webp.tif"
 COG_CENTER = (-1.421406, 43.465922)
 
 
@@ -120,6 +121,26 @@ def test_cog_big_smoke(client):
     assert r.status_code == 200
     a = np.asarray(Image.open(io.BytesIO(r.content)))
     assert (a[..., 3] > 0).sum() > 10000
+
+
+def test_cog_webp(client):
+    """WebP-compressed COG (libtiff tag 50001, 512x512 VP8 blocks, 7 levels):
+    full-res pixels match the JPEG COG of the same area within tolerance (two
+    lossy encodings of the same imagery, measured MSE 8.4), and overview tiles
+    render off the small pyramid."""
+    r = _t(client, f"/c2t/18/130009/95839?u={COG_WEBP}")
+    assert r.status_code == 200
+    a = np.asarray(Image.open(io.BytesIO(r.content)))
+    assert (a[..., 3] > 0).sum() > 40000  # the tile sits inside the footprint
+    r = _t(client, f"/c2t/18/130009/95839?u={COG_SMALL}")
+    b = np.asarray(Image.open(io.BytesIO(r.content)))
+    both = (a[..., 3] > 0) & (b[..., 3] > 0)
+    mse = np.mean((a[..., :3][both].astype(int) - b[..., :3][both].astype(int)) ** 2)
+    assert mse < 40
+    r = _t(client, f"/c2t/16/32502/23960?u={COG_WEBP}")  # straddles the footprint
+    assert r.status_code == 200
+    a = np.asarray(Image.open(io.BytesIO(r.content)))
+    assert (a[..., 3] > 0).sum() > 25000  # measured 33.5k: 492x417 m of overlap
 
 
 def test_cog_merged(client):

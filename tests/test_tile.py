@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from .conftest import (BBOX4326, COG3857, COG4326, COGBADCRS, COGROT, _web,
-                       fixture_tile, tile_url)
+from .conftest import (BBOX4326, COG3857, COG4326, COGBADCRS, COGROT, COGWEBP1,
+                       _web, fixture_tile, tile_url)
 
 
 def test_healthz(client):
@@ -232,6 +232,7 @@ def test_endpoint_error_paths(client, server):
         (f"{server.base}/missing.tif", 404),                      # unreachable
         (f"{server.base}/junk.txt", 404),                         # not a GeoTIFF
         (f"{server.base}/{COGROT}", 404),                         # rotated raster
+        (f"{server.base}/{COGWEBP1}", 404),                       # 1-band WebP level
         (f"{server.base}/{COGBADCRS}", 400),                      # unsupported CRS
     ]
     for path in (f"/c2t/{z}/{x}/{y}.geojson", "/c2t.tms.json"):

@@ -44,7 +44,7 @@ def pattern(half=False):
     return a
 
 
-def _block(arr, comp, lzw_ours, predictor, bps):
+def _block(arr, comp, lzw_ours, predictor, bps, webp_lossless=True):
     """One encoded TIFF block: bit-packed when bps=1 (masks), horizontally
     differenced when predictor=2, then compressed."""
     if bps == 1:
@@ -60,6 +60,12 @@ def _block(arr, comp, lzw_ours, predictor, bps):
         buf = io.BytesIO()
         img.save(buf, "JPEG", quality=90)
         return buf.getvalue()
+    if comp == 50001:  # TIFF WebP: a block is one whole RIFF/WEBP image
+        if arr.ndim == 2:  # libwebp cannot write grayscale: the single-band
+            arr = np.repeat(arr[..., None], 3, axis=2)  # fixture carries RGB
+            # blocks, irrelevant - the level is refused at open, never decoded
+        return (_ic.webp_encode(arr, lossless=True) if webp_lossless
+                else _ic.webp_encode(arr, lossless=False, level=75))
     if comp == 50000:
         return _ic.zstd_encode(raw)
     if comp == 5:  # TIFF LZW: "ours" = the variant the pure-Python decoder reads
@@ -69,11 +75,11 @@ def _block(arr, comp, lzw_ours, predictor, bps):
     return zlib.compress(raw)
 
 
-def _tiles(arr, comp=8, lzw_ours=True, predictor=1, bps=8):
+def _tiles(arr, comp=8, lzw_ours=True, predictor=1, bps=8, webp_lossless=True):
     th = tw = TILE
     h, w = arr.shape[:2]
     return [_block(arr[tj * th:(tj + 1) * th, ti * tw:(ti + 1) * tw],
-                   comp, lzw_ours, predictor, bps)
+                   comp, lzw_ours, predictor, bps, webp_lossless)
             for tj in range(h // th) for ti in range(w // tw)]
 
 
@@ -151,13 +157,14 @@ def pattern4(half=False):
 
 def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
               nodata=None, geokeys=None, lzw_ours=True, predictor=1, mask=False,
-              rotated=False, subifd=False, holes=False):
+              rotated=False, subifd=False, holes=False, webp_lossless=True):
     """Classic tiled little-endian TIFF: level 0 + a 2x internal overview, plus
     optional extras - a 1-bit internal coverage mask (NewSubfileType & 4), a
     horizontal-differencing predictor, GDAL_NODATA, ExtraSamples=ALPHA, a
     ModelTransformation (rotated raster, which the reader must refuse),
-    overviews as SubIFDs (tag 330) instead of the linked IFD chain, or
-    count-0 blocks (cog_merger holes: absent data in a merged footprint).
+    overviews as SubIFDs (tag 330) instead of the linked IFD chain,
+    count-0 blocks (cog_merger holes: absent data in a merged footprint), or
+    WebP blocks (compression 50001, lossless unless webp_lossless=False).
     Layout: header | tiles of each IFD | value areas | IFDs."""
     src = pattern() if samples == 3 else pattern4() if samples == 4 else pattern()[..., 0]
     src_h = (pattern(half=True) if samples == 3 else pattern4(half=True)
@@ -174,7 +181,8 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
     for l in lvls:  # a lone SHORT fits inline in the IFD; 1-bit masks never difference
         l["bps_len"] = 2 * l["samples"] if l["samples"] > 1 else 0
         l["pred"] = predictor if l["bps"] in (8, 16) else 1
-    blobs = [_tiles(l["arr"], l["comp"], lzw_ours, l["pred"], l["bps"]) for l in lvls]
+    blobs = [_tiles(l["arr"], l["comp"], lzw_ours, l["pred"], l["bps"], webp_lossless)
+             for l in lvls]
 
     # rough layout: header | tiles | areas | ifds ; areas are small so offsets
     # are computed exactly in a second pass
@@ -403,6 +411,14 @@ def fixtures_dir(tmp_path_factory):
                   geographic=True, comp=32773)
         write_cog(d / "coglzwlib.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
                   geographic=True, comp=5, lzw_ours=False)  # imagecodecs/libtiff LZW
+        write_cog(d / "cogwebp.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+                  geographic=True, comp=50001)  # lossless WebP blocks
+        write_cog(d / "cogwebpl.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+                  geographic=True, comp=50001, webp_lossless=False)  # lossy VP8
+        write_cog(d / "cogwebpa.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+                  geographic=True, comp=50001, samples=4)  # RGBA WebP + ExtraSamples
+        write_cog(d / "cogwebp1.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+                  geographic=True, comp=50001, samples=1)  # refused: not RGB/RGBA
     write_cog(d / "coglzw.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
               geographic=True, comp=5)  # LZW in the variant _lzw_decode reads
     write_cog(d / "cog16.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
@@ -469,6 +485,10 @@ COGALPHA = "cogalpha.tif"  # RGB + alpha band (ExtraSamples), transparent hole
 COGPRED = "cogpred.tif"  # deflate blocks with a horizontal-differencing predictor
 COGMASK = "cogmask.tif"  # 1-bit internal coverage mask (west third no-data)
 COGROT = "cogrot.tif"  # ModelTransformation instead of tiepoint: refused
+COGWEBP = "cogwebp.tif"  # same content, lossless WebP blocks (compression 50001)
+COGWEBPL = "cogwebpl.tif"  # lossy WebP blocks (VP8, 4:2:0)
+COGWEBPA = "cogwebpa.tif"  # RGBA WebP blocks + ExtraSamples (transparent hole)
+COGWEBP1 = "cogwebp1.tif"  # single-band WebP: refused at open (not RGB/RGBA)
 COGSUB = "cogsub.tif"  # overviews via SubIFDs (tag 330), empty IFD chain
 COGHOLE = "coghole.tif"  # east block column: count 0 = no-data merger holes
 COGBADCRS = "cogbadcrs.tif"  # geographic EPSG:42304 -> refused
