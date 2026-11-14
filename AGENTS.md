@@ -23,7 +23,8 @@ GET /robots.txt                          "User-agent: * Disallow: /c2t" + X-Robo
 
 Errors: `400` (zoom/x/y outside matrix, format, size, URL/scheme, bidx/rescale/
 blackmax, 16-bit data without `rescale`, unsupported CRS, redirect chain refused
-or looping), `404` (unreachable COG, not a GeoTIFF), `502` (upstream error).
+or looping), `404` (unreachable COG, not a GeoTIFF, rotated raster), `502`
+(upstream error).
 
 ## Locked decisions
 
@@ -49,11 +50,16 @@ simplejpeg, imagecodecs, opencv-python-headless; dev: pytest + pytest-cov + http
   pure-Python decoder rejects); ZSTD requires imagecodecs — blocks are one plain
   frame or libtiff big-endian size-prefixed segments (`_zstd_decode`).
 - Internal overviews (`NewSubfileType & 1`), **1-bit internal masks** (`& 4`) → `valid` mask.
-- GeoTIFF tags: ModelTiepoint/PixelScale (no ModelTransformation),
-  GeoKeyDirectory(+DoubleParams), GDAL_NODATA, ExtraSamples→alpha.
+- GeoTIFF tags: ModelTiepoint/PixelScale (a ModelTransformation — rotated/skewed
+  raster — is refused at open), GeoKeyDirectory(+DoubleParams), GDAL_NODATA
+  (nodata only when **every** band matches, GDAL parity), ExtraSamples→alpha.
 - CRS subset (`app/crs.py`, pure Python): 4326, 3857, 2154 (Lambert-93),
-  CC42–CC48 (3942–3948), UTM 326xx/327xx, user-defined LCC/TM from projection
-  keys (Snyder formulas, <1 cm vs PROJ CLI); anything else → 400.
+  CC42–CC48 (3942–3948), UTM 326xx/327xx, user-defined LCC/TM from the
+  projection keys (3075 = CT 1/8/9/27, both GDAL and ESRI key spellings):
+  Snyder series, forward and inverse — the inverse matches PROJ `+approx`
+  (same series family) to ≤ 0.05 mas; a wrong D⁵ longitude coefficient had
+  put ~99 m of error in UTM tiles far from the central meridian. < 1 cm and
+  < 1 mm vs PROJ golden values; anything else → 400.
 
 ## Warp pipeline (`app/tiles.py`)
 
@@ -141,16 +147,19 @@ cog2tms/
 │                          # (js/css) + josm.svg + robots.txt (served at /robots.txt)
 ├── tests/
 │   ├── conftest.py        # pure-Python COG writer + Range server with byte counter
-│   ├── test_tile.py       # offline unit tests
+│   ├── test_tile.py       # offline unit tests + endpoint error matrix + URL guardrails
+│   ├── test_crs.py        # PROJ golden values (forward/inverse), geokeys dispatch
 │   ├── test_ranges.py     # local byte-range proof (bytes served, Range-only)
 │   ├── test_multirange.py # multi-range support + per-host fallback learning
 │   ├── test_retries.py    # fault injection: 429/5xx retries, negative cache
 │   ├── test_versions.py   # coherence when the COG is replaced under one URL
 │   ├── test_redirects.py  # own 30x walking + per-hop check_url + target moves
 │   ├── test_codecs.py     # JPEG-in-TIFF fixtures, codec parity, ZSTD, threaded decode
+│   ├── test_pixels.py     # 16-bit rescale, nodata, alpha, internal mask, sliced index
 │   ├── test_format.py     # webp output + format=auto Accept negotiation
 │   └── test_network.py    # integration on remote COGs (`network` marker) + relay proxy proof
 ├── Dockerfile             # python:3.12-slim → pip install . → uvicorn --workers 4
+├── cog2tms.service        # systemd unit: boot + Restart=always, hardened (see README)
 └── README.md
 ```
 
@@ -185,7 +194,9 @@ Anglet center tile: `13/4061/2994`, `17/64982/47917`.
 
 Fixtures written **in pure Python by conftest** (tiled TIFF + internal 2×
 overview + GeoTIFF tags): EPSG:4326 and EPSG:3857 COGs with identical content,
-JPEG-in-TIFF, single-band JPEG, LZW/PackBits/ZSTD variants — served by a local
+JPEG-in-TIFF, single-band JPEG, LZW (both dialects)/PackBits/ZSTD/predictor-2,
+16-bit single band, GDAL_NODATA, ExtraSamples alpha, 1-bit internal mask,
+ModelTransformation, unsupported CRS, a non-TIFF file — served by a local
 Range-capable HTTP server that counts bytes. Pinned behaviors (do not break):
 
 - center tile PNG; **XYZ convention** (a northern-half red square lands in the
@@ -201,16 +212,35 @@ Range-capable HTTP server that counts bytes. Pinned behaviors (do not break):
   `image/webp;q>0` — the source codec never interferes; cache keyed by the
   resolved format;
 - 400 paths (zoom, x/y, format, scheme, bidx, rescale, blackmax), 404 missing
-  COG, `size`/`bidx`, TileJSON/GeoJSON/healthz; web UI (`GET /` = MapLibre page
-  + vendored assets, `/maplibre` redirects to `/`);
+  COG / non-TIFF / rotated raster, `size`/`bidx`, TileJSON/GeoJSON/healthz; the
+  same open-error matrix on `.geojson` and `.tms.json`; web UI (`GET /` =
+  MapLibre page + vendored assets, `/maplibre` redirects to `/`);
+- **URL guardrails**: `ALLOWED_HOSTS` enforced on every request — including one
+  served from the encoded-tile cache — and re-checked on every redirect hop;
+  `check_url` unit cases (scheme, missing host, unresolvable host, private/
+  reserved address when `ALLOW_PRIVATE_NET` is off);
+- **CRS goldens** (`cs2cs` values): forward < 1 cm and inverse < 1 mm for 4326,
+  3857, L93, CC43, CC46, UTM 31N/33S and a 1-standard-parallel LCC; user-defined
+  LCC/TM built from both GDAL (3084-3087) and ESRI (3080-3083, 3092) key
+  spellings; geokeys dispatch + refusal messages; `unit_scale` table;
+- **pixel semantics**: 16-bit refuses to render without `rescale`, and
+  `rescale=0,65535` restores the 8-bit fixture bit-for-bit; `GDAL_NODATA`
+  removes coverage only when every band matches; `ExtraSamples` alpha and the
+  **1-bit internal mask** (level whose dims match only) drive `valid`; a
+  `ModelTransformation` level is refused at open; `TileOffsets` above
+  `_SLICE_AT` fetched as per-window slices — pixels identical to whole-load;
 - **byte-range proof**: served bytes ≪ file size, every upstream request has
   `Range:`; multi-range fallback learned per host;
 - **codecs**: JPEG-in-TIFF renders like the deflate fixture and stays north-up;
   simplejpeg vs Pillow parity (≤ 2 levels); imagecodecs LZW/PackBits blocks
   byte-exact, including the **libtiff LZW variant** (our pure-Python decoder
-  rejects it — pinned); **ZSTD** byte-identical to deflate, plain frame +
-  size-prefixed segment blocks, no imagecodecs → CogError; pooled decode
-  byte-identical to inline; `_threaded_decode` gating (GIL-free codec + ≥1 Mpx);
+  rejects it — pinned); predictor 2 bit-identical to plain deflate; **ZSTD**
+  byte-identical to deflate, plain frame + size-prefixed segment blocks, no
+  imagecodecs → CogError; pooled decode byte-identical to inline;
+  `_threaded_decode` gating (GIL-free codec + ≥1 Mpx); the pure-Python fallbacks
+  tested directly: `_packbits_decode` golden byte sequences, `_lzw_decode`
+  round-trips against the conftest mirror-encoder (width changes + clear-code
+  restart) and its `bad LZW code` refusal;
 - **fault injection**: 429/5xx retries (Retry-After honored, bounded), 404/403
   negative cache;
 - **version coherence** (mutable in-memory COG server): `CogChanged` on
@@ -248,8 +278,8 @@ public-COG verification. WebP and `format=auto` done on top.
   (`imagecodecs.jpegxl_*` decodes; Pillow cannot write JXL).
 - Close to free: LERC/CCITT/JPEG-XL *decode* (new `comp` dispatch branches +
   fixtures); average-area resampling option (`resampling=`); rescale percentile
-  auto; host allowlist tests; BigTIFF overview masks on more samples; seam test
-  across the 4 Bayonne COGs.
+  auto; BigTIFF offline fixture (today only the network COGs exercise it);
+  BigTIFF overview masks on more samples; seam test across the 4 Bayonne COGs.
 - Known limits: the pure-Python LZW fallback reads only its own variant (libtiff
   output needs imagecodecs); `PNG_COMPRESS` retune (level 0: 6 ms vs 15 ms,
   +13 % bytes) is the last non-dependency perf lever.

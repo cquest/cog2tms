@@ -102,11 +102,17 @@ def _parse_blackmax(blackmax: str | None) -> int | None:
     return v
 
 
-async def _open(u: str):
+def _guard(u: str):
+    """URL policy (scheme/SSRF/allowlist); lru_cached, so it is cheap enough to
+    run on every request, including one answered from the encoded-tile cache."""
     try:
         check_url(u)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+async def _open(u: str):
+    _guard(u)
     for attempt in (0, 1):
         try:
             return await pool.get(u)
@@ -157,6 +163,8 @@ async def tile(z: int, x: int, y: int, u: str = Query(...), format: str = "png",
     if format == "auto":
         format = "webp" if _accepts_webp(request.headers.get("accept", "")) else "png"
     key = f"{u}|{z}|{x}|{y}|{format}|{quality}|{size}|{bidx}|{rescale}|{blackmax}"
+    _guard(u)  # also enforced on cache hits: a host taken out of the allowlist
+    # must stop being served, even from the encoded-tile cache
     # at most one 1-byte If-Range probe per VALIDATE_TTL and per COG: it drops
     # cached tiles and the open reader when the file was replaced under the URL
     await _revalidate(u)

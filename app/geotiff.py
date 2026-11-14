@@ -393,7 +393,9 @@ class CogFile:
             s = 3
         if self.nodata is not None:
             nd = np.array(self.nodata[: s], dtype=out.dtype)
-            valid &= ~np.any(out == nd, axis=-1)
+            # GDAL semantics: nodata only when every band matches (np.any would
+            # also drop pixels that share one channel value with nodata)
+            valid &= ~np.all(out == nd, axis=-1)
         return out, valid
 
     def _window(self, lvl: _Level, ns: int, c0: int, r0: int, c1: int, r1: int):

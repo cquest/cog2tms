@@ -159,7 +159,9 @@ class TransverseMercator(CRS):
         p = (p1 - NN * math.tan(p1) / R1 * (D * D / 2
              - (5 + 3 * T1 + 10 * C1 - 4 * C1 ** 2 - 9 * self.ell.ep2) * D ** 4 / 24
              + (61 + 90 * T1 + 298 * C1 + 45 * T1 * T1 - 252 * self.ell.ep2 - 3 * C1 ** 2) * D ** 6 / 720))
-        d = (D - (1 + T1 - C1) * D ** 3 / 6 + (5 - 2 * C1 + C1 * C1 - 9 * T1) * D ** 5 / 120) / cp
+        d = (D - (1 + 2 * T1 + C1) * D ** 3 / 6
+             + (5 + 28 * T1 + 24 * T1 * T1 + 14 * C1) * D ** 5 / 120
+             - (61 + 662 * T1 + 1320 * T1 * T1 + 720 * T1 ** 3) * D ** 7 / 5040) / cp
         return (self.lon_0 + d) / D2R, p / D2R
 
 
@@ -201,19 +203,28 @@ def crs_from_geokeys(key: dict) -> CRS:
     if code in _LCC_EPSG:
         lat_0, lon_0, s1, s2, x_0, y_0 = _LCC_EPSG[code]
         return LambertConformalConic(f"EPSG:{code}", GRS80, lat_0, lon_0, s1, s2, x_0, y_0)
-    if 32601 <= code <= 32660 or 32701 <= code <= 32760:
+    if code and (32601 <= code <= 32660 or 32701 <= code <= 32760):
         zone = code % 32700 if code > 32700 else code - 32600
         return TransverseMercator(f"EPSG:{code}", WGS84, 6 * zone - 183,
                                   0.9996, 500000.0, 10000000.0 if code > 32700 else 0.0)
     if code == 32767:  # user-defined: build from GeoTIFF projection keys
-        pc = key.get(3075)
-        if pc in (2, 3):
+        pc = key.get(3075)  # ProjCoordTransGeoKey (GeoTIFF CT codes)
+        # 3080/3081 = natural origin (long, lat), 3084/3085 = false origin
+        # (long, lat), 3082/3083 and 3086/3087 = false easting/northing under
+        # either spelling: ESRI writes the first pair, GDAL the second.
+        lon_0 = key.get(3084, key.get(3080, 0.0))
+        if pc in (8, 9):  # CT_LambertConfConic_2SP / _Helmert (1SP)
+            lat_0 = key.get(3085, key.get(3081, 0.0))
             return LambertConformalConic(
-                "user-defined LCC", GRS80, key.get(3085, 0.0), key.get(3081, key.get(3084, 0.0)),
-                key.get(3078, 0.0), key.get(3079, 0.0), key.get(3082, 0.0), key.get(3083, 0.0))
-        if pc in (13, 26, 27):
-            return TransverseMercator("user-defined TM", WGS84, key.get(3084, 0.0),
-                                      key.get(3086, 1.0), key.get(3082, 500000.0), key.get(3083, 0.0))
+                "user-defined LCC", GRS80, lat_0, lon_0,
+                key.get(3078, lat_0),  # 1SP (pc 9): the parallel is lat_0
+                key.get(3079, 0.0), key.get(3086, key.get(3082, 0.0)),
+                key.get(3087, key.get(3083, 0.0)))
+        if pc in (1, 27):  # CT_TransverseMercator / _SouthOriented
+            return TransverseMercator("user-defined TM", WGS84, lon_0,
+                                      key.get(3092, key.get(3093, 1.0)),
+                                      key.get(3086, key.get(3082, 500000.0)),
+                                      key.get(3087, key.get(3083, 0.0)))
     if code == 4326:
         return GEOGRAPHIC
     raise UnsupportedCRS(f"unsupported projected CRS {code}")

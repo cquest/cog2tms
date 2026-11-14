@@ -124,7 +124,9 @@ multi-thread, cache LRU de tuiles avec verrous single-flight) : détails dans
 
 - **Anti-SSRF** : URLs de COG `http(s)` uniquement ; les cibles résolvant vers
   des IP privées ou réservées sont rejetées (dev/tests : `ALLOW_PRIVATE_NET=1`) ;
-  chaque `Location` d'une chaîne 30x est re-validée avant connexion.
+  chaque `Location` d'une chaîne 30x est re-validée avant connexion ; la
+  politique d'URL (liste blanche comprise) est vérifiée sur chaque requête, même
+  celles servies depuis le cache de tuiles.
 - **Résilience** : 429/5xx réessayés transparentement (`Retry-After` respecté) ;
   404/403 amont mémorisés par URL ; les tuiles en cache continuent d'être
   servies quand l'amont est en panne.

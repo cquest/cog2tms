@@ -121,7 +121,8 @@ locks): detailed in [AGENTS.md](AGENTS.md).
 
 - **Anti-SSRF**: only `http(s)` COG URLs; targets resolving to private or
   reserved IPs are rejected (dev/tests: `ALLOW_PRIVATE_NET=1`); every `Location`
-  of a 30x chain is re-validated before connecting.
+  of a 30x chain is re-validated before connecting; the URL policy (allowlist
+  included) is checked on every request, even one answered from the tile cache.
 - **Resilience**: 429/5xx retried transparently (`Retry-After` honored); remote
   404/403 remembered per URL; cached tiles keep being served while upstream is
   down.

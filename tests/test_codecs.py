@@ -8,7 +8,8 @@ import pytest
 from app import geotiff as g
 from app import tiles
 from app.httprange import LocalReader
-from .conftest import COG4326, COGJPEG, COGJPEG1, COGZSTD, fixture_tile
+from .conftest import (COG4326, COGLZW, COGLZWLIB, COGJPEG, COGJPEG1, COGPACK,
+                       COGPRED, COGZSTD, fixture_tile)
 
 POOL = g._POOL  # the pool as configured, to put it back inside tests
 
@@ -177,6 +178,61 @@ def test_zstd_multisegment_blocks():
     assert a.shape == (128, 64, 3) and (a[:64] == blk).all() and (a[64:] == blk).all()
     with pytest.raises(g.CogError):  # a mangled segment table must not read past the end
         g._zstd_decode(len(frame).to_bytes(4, "big") + frame[:8])
+
+
+def test_pure_packbits_decode_golden():
+    """count<128: literal copy of count+1 bytes; >128: repeat 257-count; 128: no-op."""
+    raw = bytes([2, 10, 20, 30]) + bytes([0xFB, 0x42]) + bytes([0x80]) + bytes([0, 99])
+    assert g._packbits_decode(raw) == bytes([10, 20, 30] + [0x42] * 6 + [99])
+
+
+def test_pure_lzw_decoder_roundtrip():
+    """The pure-Python decoder and the conftest mirror-encoder must agree: this
+    pins the one dialect that fallback can read (libtiff's needs imagecodecs).
+    The sizes cross the 512/1024 code-width changes and the 4096 clear restart."""
+    from .conftest import _lzw_encode, pattern
+    blobs = (b"Hi!", b"", b"ABABABAB" * 700, pattern().tobytes()[: 128 * 128 * 3],
+             np.zeros(100_000, np.uint8).tobytes(),
+             np.random.default_rng(1).integers(0, 256, 60_000, dtype=np.uint8).tobytes())
+    for blob in blobs:
+        assert g._lzw_decode(_lzw_encode(blob)) == blob, len(blob)
+
+
+def test_pure_lzw_decoder_rejects_unknown_code():
+    """9 bits with value 300 while the table holds only up to 258."""
+    with pytest.raises(g.CogError, match="bad LZW code"):
+        g._lzw_decode(b"\x96\x00")
+
+
+def test_predictor2_fixture_renders(fixtures_dir):
+    """Deflate + predictor 2 (horizontal differencing): after the modular cumsum
+    the blocks are bit-identical to the plain deflate fixture."""
+    ref = _rgb_valid(*_render(fixtures_dir, COG4326))
+    assert (_rgb_valid(*_render(fixtures_dir, COGPRED)) == ref).all()
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_packbits_fixture_renders(fixtures_dir, monkeypatch):
+    """A PackBits COG renders like the deflate fixture, through imagecodecs
+    (standard variant) and through our pure-Python decoder when it is absent."""
+    ref = _rgb_valid(*_render(fixtures_dir, COG4326))
+    assert (_rgb_valid(*_render(fixtures_dir, COGPACK)) == ref).all()
+    monkeypatch.setattr(g, "_ic", None)
+    assert (_rgb_valid(*_render(fixtures_dir, COGPACK)) == ref).all()
+
+
+def test_lzw_variants_end_to_end(fixtures_dir, monkeypatch):
+    """imagecodecs reads the libtiff-written blocks; with it absent only the
+    blocks written in _lzw_decode's own dialect render - the other variant is
+    refused (known limit, see AGENTS)."""
+    if g._ic is not None:
+        ref = _rgb_valid(*_render(fixtures_dir, COG4326))
+        assert (_rgb_valid(*_render(fixtures_dir, COGLZWLIB)) == ref).all()
+    monkeypatch.setattr(g, "_ic", None)
+    ref = _rgb_valid(*_render(fixtures_dir, COG4326))
+    assert (_rgb_valid(*_render(fixtures_dir, COGLZW)) == ref).all()
+    with pytest.raises(g.CogError):
+        _render(fixtures_dir, COGLZWLIB)
 
 
 def _lvl(comp):

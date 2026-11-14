@@ -2,9 +2,11 @@
 import io
 
 import numpy as np
+import pytest
 from PIL import Image
 
-from .conftest import BBOX4326, COG3857, COG4326, _web, fixture_tile, tile_url
+from .conftest import (BBOX4326, COG3857, COG4326, COGBADCRS, COGROT, _web,
+                       fixture_tile, tile_url)
 
 
 def test_healthz(client):
@@ -220,3 +222,60 @@ def test_cog_local_not_accepted(client, tmp_path):
     """The public API only accepts http(s), never local paths."""
     r = client.get("/c2t/1/0/0", params={"u": "/etc/hostname"})
     assert r.status_code == 400
+
+
+def test_endpoint_error_paths(client, server):
+    """geojson and TileJSON go through the same URL/open error mapping."""
+    z, x, y = fixture_tile()
+    cases = [
+        ("ftp://example.invalid/x.tif", 400),                     # scheme
+        (f"{server.base}/missing.tif", 404),                      # unreachable
+        (f"{server.base}/junk.txt", 404),                         # not a GeoTIFF
+        (f"{server.base}/{COGROT}", 404),                         # rotated raster
+        (f"{server.base}/{COGBADCRS}", 400),                      # unsupported CRS
+    ]
+    for path in (f"/c2t/{z}/{x}/{y}.geojson", "/c2t.tms.json"):
+        for u, want in cases:
+            r = client.get(path, params={"u": u})
+            assert r.status_code == want, (path, u, r.status_code)
+
+
+def test_allowed_hosts(client, server, monkeypatch):
+    """A deployment allowlist rejects every other host before connecting."""
+    from app import security as sec
+    monkeypatch.setattr(sec, "ALLOWED_HOSTS", ["other.example"])
+    sec.check_url.cache_clear()
+    z, x, y = fixture_tile()
+    u = f"{server.base}/{COG4326}"
+    for path in (f"/c2t/{z}/{x}/{y}", "/c2t.tms.json"):
+        r = client.get(path, params={"u": u})
+        assert r.status_code == 400 and "not allowed" in r.json()["detail"]
+    # the allowlisted host still works
+    from urllib.parse import urlsplit
+    monkeypatch.setattr(sec, "ALLOWED_HOSTS", [urlsplit(server.base).hostname])
+    sec.check_url.cache_clear()
+    assert client.get(f"/c2t/{z}/{x}/{y}", params={"u": u}).status_code == 200
+    sec.check_url.cache_clear()  # leave no verdict anchored to a patched allowlist
+
+
+def test_check_url_guardrails():
+    """Direct unit coverage of the SSRF guardrails (cache cleared per case)."""
+    from app import security as sec
+    sec.check_url.cache_clear()
+    for bad, msg in [(r"ftp://example.com/x.tif", r"only http\(s\)"),
+                     ("http:///x.tif", "missing host"),
+                     ("https://does-not-exist.invalid/x.tif", "cannot resolve")]:
+        with pytest.raises(ValueError, match=msg):
+            sec.check_url(bad)
+        sec.check_url.cache_clear()
+    # loopback fixtures are only reachable because ALLOW_PRIVATE_NET=1 is set
+    # by conftest; with it off, the very same host is a refusal
+    monkey_saved = sec.ALLOW_PRIVATE_NET
+    sec.ALLOW_PRIVATE_NET = False
+    try:
+        sec.check_url.cache_clear()
+        with pytest.raises(ValueError, match="private or reserved"):
+            sec.check_url("http://127.0.0.1:1/x.tif")
+    finally:
+        sec.ALLOW_PRIVATE_NET = monkey_saved
+        sec.check_url.cache_clear()

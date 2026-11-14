@@ -28,7 +28,7 @@ branch = true
 
 [tool.coverage.report]
 exclude_also = ["except ImportError:"]  # codec fallback paths need the wheel absent
-fail_under = 75  # measured offline: 78% (offline+network: 82%) — retune up as tests grow
+fail_under = 85  # measured: 90% offline, 91% offline+network — retune as tests grow
 
 [build-system]
 requires = ["hatchling"]
