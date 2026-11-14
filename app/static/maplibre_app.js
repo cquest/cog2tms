@@ -195,6 +195,9 @@ map = new maplibregl.Map({
   container: "map",
   style: $("base").checked ? BASE_STYLE : BG_STYLE,
   maxZoom: MAX_ZOOM,
+  // attribution always visible: the default control collapses to an ⓘ icon
+  // once the canvas is <= 640 px wide (common with the side panel)
+  attributionControl: {compact: false},
   ...(savedView ?? {center: [2.4, 46.6], zoom: 5}),
 });
 map.addControl(new maplibregl.NavigationControl({showCompass: false}), "top-right");
