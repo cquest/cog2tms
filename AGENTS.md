@@ -49,7 +49,10 @@ simplejpeg, imagecodecs, opencv-python-headless; dev: pytest + pytest-cov + http
   **imagecodecs** when installed (it also reads the libtiff LZW variant our
   pure-Python decoder rejects); ZSTD requires imagecodecs — blocks are one plain
   frame or libtiff big-endian size-prefixed segments (`_zstd_decode`).
-- Internal overviews (`NewSubfileType & 1`), **1-bit internal masks** (`& 4`) → `valid` mask.
+- Internal overviews (`NewSubfileType & 1`) — linked IFD chain **or SubIFDs**
+  (tag 330, what `cog_merger` writes); **1-bit internal masks** (`& 4`) →
+  `valid` mask; merger union holes: `TileByteCounts` entries of 0 are never
+  fetched and stay no-coverage (transparent, not a black smear).
 - GeoTIFF tags: ModelTiepoint/PixelScale (a ModelTransformation — rotated/skewed
   raster — is refused at open), GeoKeyDirectory(+DoubleParams), GDAL_NODATA
   (nodata only when **every** band matches, GDAL parity), ExtraSamples→alpha.
@@ -174,6 +177,7 @@ version checks; `MULTIRANGE=0` forces single ranges.
 ```python
 COG_SMALL  = "https://data.cquest.org/temp/cog4josm/COG_BayonneSudEst.tif"   # 875 MB
 COG_BIG    = "https://data.cquest.org/temp/cog4josm/Anglet2025_COG.tif"      # 3.8 GB (BigTIFF + masks)
+COG_MERGED = "https://data.cquest.org/temp/cog4josm/COG_Bayonne_2025b.tif"   # 5.9 GB (cog_merger union)
 COG_CENTER = (-1.421406, 43.465922)   # west of Bayonne
 ```
 
@@ -182,11 +186,15 @@ COG_CENTER = (-1.421406, 43.465922)   # west of Bayonne
 | COG_BayonneSudEst.tif | 875 MB | classic TIFF, JPEG, 11 levels | EPSG:3943 (CC43) | reference; 128×128 blocks |
 | Anglet2025_COG.tif | 3.8 GB | **BigTIFF**, JPEG, 10 levels + **1-bit masks** | EPSG:3943 | very-large-file stress test |
 | COG_Bayonne{NordEst,NordOuest,SudOuest}.tif | 1.5–1.7 GB | classic TIFF | EPSG:3943 | 4-tile footprint seam |
+| COG_Bayonne_2025b.tif | 5.9 GB | **BigTIFF**, JPEG, 8 overviews as **SubIFDs** | EPSG:3943 | `cog_merger` union of the 4 Bayonne COGs: count-0 hole blocks (SE notch), 34 MB TileOffsets arrays (slice path) |
 
 Verified: server advertises `Accept-Ranges: bytes`; opaque RGB without NoData on Bayonne;
 4.8 cm/px GSD → useful zoom ~17–19. Tiles over `COG_CENTER`: `13/4063/2995`,
 `16/32509/23964`, `18/130034/95856` (bright; exact geometric center is dark water).
 Anglet center tile: `13/4061/2994`, `17/64982/47917`.
+Merged: center `13/4062/2994`, `18/130008/95838`; notch hole `17/65034/47949`
+(fully transparent); black-fringe tile `18/130010/95895` (transparent at default
+blackmax, opaque black with `blackmax=-1`).
 
 ## Tests
 
@@ -196,8 +204,9 @@ Fixtures written **in pure Python by conftest** (tiled TIFF + internal 2×
 overview + GeoTIFF tags): EPSG:4326 and EPSG:3857 COGs with identical content,
 JPEG-in-TIFF, single-band JPEG, LZW (both dialects)/PackBits/ZSTD/predictor-2,
 16-bit single band, GDAL_NODATA, ExtraSamples alpha, 1-bit internal mask,
-ModelTransformation, unsupported CRS, a non-TIFF file — served by a local
-Range-capable HTTP server that counts bytes. Pinned behaviors (do not break):
+ModelTransformation, unsupported CRS, SubIFD-published overviews (empty chain),
+count-0 merger-hole blocks (bogus past-EOF offsets), a non-TIFF file — served
+by a local Range-capable HTTP server that counts bytes. Pinned behaviors (do not break):
 
 - center tile PNG; **XYZ convention** (a northern-half red square lands in the
   tile's upper half); **reprojection parity** 4326 vs 3857 (MSE < 100);
@@ -229,6 +238,9 @@ Range-capable HTTP server that counts bytes. Pinned behaviors (do not break):
   **1-bit internal mask** (level whose dims match only) drive `valid`; a
   `ModelTransformation` level is refused at open; `TileOffsets` above
   `_SLICE_AT` fetched as per-window slices — pixels identical to whole-load;
+  **SubIFD overviews** (tag 330, empty IFD chain) open with the same levels and
+  render pixel-identical; **count-0 blocks** (merger holes, fixture offsets
+  past EOF) are never fetched and stay no-coverage;
 - **byte-range proof**: served bytes ≪ file size, every upstream request has
   `Range:`; multi-range fallback learned per host;
 - **codecs**: JPEG-in-TIFF renders like the deflate fixture and stays north-up;
@@ -260,6 +272,10 @@ Range-capable HTTP server that counts bytes. Pinned behaviors (do not break):
   png bytes; edge tile `13/4064/2995` → no opaque pixel >2 tile-px outside the
   web bbox; TileJSON bbox ≈ footprint; GeoJSON ring closed; COG_BIG z17 → 200
   with coverage (mask applied);
+- **merged COG** (COG_MERGED, `cog_merger` union of the 4 Bayonne files):
+  overview tiles render (SubIFDs found), notch tile fully transparent
+  (count-0 holes), adjacent black-fringe tile transparent by default and
+  opaque black with `blackmax=-1` (hole ≠ black fringe);
 - **remote byte-range**: counting relay proxy in front of COG_SMALL →
   transferred < 1 % of file, no upstream request without `Range:`.
 
@@ -279,7 +295,7 @@ public-COG verification. WebP and `format=auto` done on top.
 - Close to free: LERC/CCITT/JPEG-XL *decode* (new `comp` dispatch branches +
   fixtures); average-area resampling option (`resampling=`); rescale percentile
   auto; BigTIFF offline fixture (today only the network COGs exercise it);
-  BigTIFF overview masks on more samples; seam test across the 4 Bayonne COGs.
+  BigTIFF overview masks on more samples.
 - Known limits: the pure-Python LZW fallback reads only its own variant (libtiff
   output needs imagecodecs); `PNG_COMPRESS` retune (level 0: 6 ms vs 15 ms,
   +13 % bytes) is the last non-dependency perf lever.

@@ -42,6 +42,7 @@ _NEW_SUBFILE, _W, _H, _BPS, _COMP, _PHOTOM = 254, 256, 257, 258, 259, 262
 _SAMPLES, _EXTRA, _PLANAR = 277, 338, 284
 _TILEW, _TILEH, _TILOFFS, _TILCNTS, _PREDICTOR = 322, 323, 324, 325, 317
 _TIEPOINT, _SCALE, _MODELTRANSF = 33922, 33550, 34264
+_SUBIFDS = 330  # alternate overview layout: IFD offsets here, chain not used
 _GEOKEYS, _GEODOUBLE, _JPEGTABLES, _GDAL_NODATA = 34735, 34736, 347, 42113
 
 _DT = {8: "u1", 16: "u2", 32: "u4"}
@@ -261,6 +262,18 @@ class CogFile:
                 self.levels.append(_Level(self.end, tags, self.reader))
             else:
                 break
+        if _SUBIFDS in tags0:
+            # writers like cog_merger put overviews in a SubIFD table (tag 330)
+            # instead of the linked chain: same classification, own RTT each
+            typ, cnt, v = tags0[_SUBIFDS]
+            f, sz = _TYPES[typ]
+            for off in struct.unpack(self.end + f * cnt, v[: sz * cnt]):
+                stags, _n = self._parse_ifd(off)
+                sub = _scalar(self.end, stags, _NEW_SUBFILE) or 0
+                if sub & 4:
+                    self.masks.append(_Level(self.end, stags, self.reader))
+                elif sub & 1:
+                    self.levels.append(_Level(self.end, stags, self.reader))
         if not self.levels:
             raise CogError("no image IFD")
         self._init_geo(tags0)
@@ -424,13 +437,17 @@ class CogFile:
         if missing:
             base = tj0 * lvl.cols + ti0
             offs, cnts = lvl.index(base, tj1 * lvl.cols + ti1)
-            spans = [(int(offs[idx - base]), int(cnts[idx - base])) for _k, idx in missing]
-            raws = self.reader.read_many(spans)
+            # mergers (cog_merger) union rotated footprints by leaving absent
+            # blocks with byte count 0: never fetch those, and keep the hole
+            # no-coverage (valid stays False -> transparent, not black smear)
+            todo = [(k, int(offs[idx - base]), int(cnts[idx - base]))
+                    for k, idx in missing if int(cnts[idx - base])]
+            raws = self.reader.read_many([(o, c) for _k, o, c in todo]) if todo else []
             if _POOL is not None and _threaded_decode(lvl, len(raws)):
                 decoded = list(_POOL.map(lambda raw: self._decode(lvl, raw), raws))
             else:
                 decoded = [self._decode(lvl, raw) for raw in raws]
-            for (k, _idx), blk in zip(missing, decoded):
+            for (k, _o, _c), blk in zip(todo, decoded):
                 blocks[k] = blk
                 self._cache[k] = blk
             while len(self._cache) > config.BLOCK_CACHE:
@@ -438,7 +455,9 @@ class CogFile:
 
         for tj in range(tj0, tj1 + 1):
             for ti in range(ti0, ti1 + 1):
-                blk = blocks[(ns, ti, tj)]
+                blk = blocks.get((ns, ti, tj))  # None: count-0 hole
+                if blk is None:
+                    continue
                 by, bx = tj * lvl.tileh, ti * lvl.tilew
                 oy, ox = max(by, lo_r), max(bx, lo_c)
                 eh = min(by + lvl.tileh, lvl.height, hi_r) - oy

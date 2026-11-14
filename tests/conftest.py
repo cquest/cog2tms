@@ -151,11 +151,13 @@ def pattern4(half=False):
 
 def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
               nodata=None, geokeys=None, lzw_ours=True, predictor=1, mask=False,
-              rotated=False):
+              rotated=False, subifd=False, holes=False):
     """Classic tiled little-endian TIFF: level 0 + a 2x internal overview, plus
     optional extras - a 1-bit internal coverage mask (NewSubfileType & 4), a
-    horizontal-differencing predictor, GDAL_NODATA, ExtraSamples=ALPHA, or a
-    ModelTransformation (rotated raster, which the reader must refuse).
+    horizontal-differencing predictor, GDAL_NODATA, ExtraSamples=ALPHA, a
+    ModelTransformation (rotated raster, which the reader must refuse),
+    overviews as SubIFDs (tag 330) instead of the linked IFD chain, or
+    count-0 blocks (cog_merger holes: absent data in a merged footprint).
     Layout: header | tiles of each IFD | value areas | IFDs."""
     src = pattern() if samples == 3 else pattern4() if samples == 4 else pattern()[..., 0]
     src_h = (pattern(half=True) if samples == 3 else pattern4(half=True)
@@ -212,8 +214,14 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
             if nodata:  # GDAL_NODATA (ASCII, inline when 4 bytes or fewer)
                 ent.append((42113, 2, len(nodata),
                             struct.pack("<4s", nodata.encode()) if len(nodata) <= 4 else None))
+        if i == 0 and subifd:  # SubIFDs (cog_merger layout): overview IFD offsets
+            no = len(lvls) - 1
+            # a single LONG must be inline (spec: no pointer for <=4-byte values)
+            ent.append((330, 4, no, b"PTRO" if no == 1 else None))
+            if no > 1:
+                areas.append((330, 4 * no))
         # area layout: bps (0 if inline) | offs | cnts | then for geo IFDs:
-        # scale | tiepoint | geokeys | transformation | nodata
+        # scale | tiepoint | geokeys | transformation | nodata | then subifds
         areas = [(258, l["bps_len"]), (324, 4 * nt), (325, 4 * nt)]
         if l["geo"]:
             areas += [(33550, 24), (33922, 48), (34735, 2 * len(geokeys))]
@@ -221,15 +229,21 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
                 areas.append((34264, 128))
             if nodata and len(nodata) > 4:
                 areas.append((42113, len(nodata)))
+        if i == 0 and subifd:
+            areas.append((330, 4 * (len(lvls) - 1)))
         return ent, areas
 
     def area_bytes(i):
         l, nt = lvls[i], nts[i]
+        cols = l["arr"].shape[1] // TILE
+        # cog_merger holes: last block column of each image level has count 0
+        cnts = [0 if holes and i < 2 and j % cols == cols - 1 else len(b)
+                for j, b in enumerate(blobs[i])]
         a = bytearray()
         a.extend(struct.pack("<" + "H" * l["samples"], *([l["bps"]] * l["samples"]))
                  if l["bps_len"] else b"")
         a.extend(struct.pack("<" + "I" * nt, *([0] * nt)))   # TileOffsets (patched)
-        a.extend(struct.pack("<" + "I" * nt, *[len(b) for b in blobs[i]]))
+        a.extend(struct.pack("<" + "I" * nt, *cnts))
         if l["geo"]:
             a.extend(struct.pack("<3d", psx, psy, 0.0))
             a.extend(struct.pack("<6d", 0, 0, 0, ox, oy, 0.0))
@@ -239,6 +253,8 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
                 a.extend(struct.pack("<16d", *m))
             if nodata and len(nodata) > 4:
                 a.extend(nodata.encode())  # GDAL_NODATA beyond 4 bytes: out of line
+        if i == 0 and subifd and len(lvls) > 2:
+            a.extend(bytes(4 * (len(lvls) - 1)))  # overview IFD offsets (patched)
         return bytes(a)
 
     area_blobs = [area_bytes(i) for i in range(len(lvls))]
@@ -254,6 +270,8 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
         for code, typ, cnt, raw in ent:
             if raw is None:
                 raw = struct.pack("<I", pos[code])
+            elif raw == b"PTRO":  # single SubIFD offset: inline, resolved now
+                raw = struct.pack("<I", ifd_offs[1])
             out += struct.pack("<HHI", code, typ, cnt) + raw[:4].ljust(4, b"\0")
         out += struct.pack("<I", next_off)
         return out
@@ -264,15 +282,26 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
         ifd_offs.append(p)
         p += 2 + 12 * len(ifd_entries(i)[0]) + 4
 
-    # patch tile offsets inside area_blobs (absolute file offsets)
+    # patch tile offsets inside area_blobs (absolute file offsets); merger
+    # holes get count 0 and an offset past EOF: a reader that (wrongly) tried
+    # to fetch them would hit an HTTP error, making the bug loud in tests
     cur = tile_off
     for i, lv in enumerate(blobs):
         ab = bytearray(area_blobs[i])
         base = lvls[i]["bps_len"]
+        cols = lvls[i]["arr"].shape[1] // TILE
         for j, b in enumerate(lv):
-            ab[base + 4 * j: base + 4 * j + 4] = struct.pack("<I", cur)
+            bad = holes and i < 2 and j % cols == cols - 1
+            ab[base + 4 * j: base + 4 * j + 4] = struct.pack("<I", 0x7FFF_FFFF if bad else cur)
             cur += len(b)
         area_blobs[i] = bytes(ab)
+
+    if subifd and len(lvls) > 2:  # SubIFDs array of IFD0 (last area): overview offsets
+        ab = bytearray(area_blobs[0])
+        p330 = len(ab) - 4 * (len(lvls) - 1)
+        for k, o in enumerate(ifd_offs[1:]):
+            ab[p330 + 4 * k: p330 + 4 * k + 4] = struct.pack("<I", o)
+        area_blobs[0] = bytes(ab)
 
     out = bytearray(struct.pack("<2sHI", b"II", 42, ifd_offs[0]))
     for lv in blobs:
@@ -281,7 +310,8 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
     for ab in area_blobs:
         out.extend(ab)
     for i in range(len(lvls)):
-        out.extend(ifd_bytes(i, ifd_offs[i + 1] if i + 1 < len(ifd_offs) else 0))
+        nxt = 0 if subifd else (ifd_offs[i + 1] if i + 1 < len(ifd_offs) else 0)
+        out.extend(ifd_bytes(i, nxt))
     assert len(out) == p, (len(out), p)
     with open(path, "wb") as f:
         f.write(out)
@@ -388,7 +418,11 @@ def fixtures_dir(tmp_path_factory):
     write_cog(d / "cogmask.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
               geographic=True, mask=True)  # 1-bit internal coverage mask
     write_cog(d / "cogrot.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
-              geographic=True, rotated=True)  # ModelTransformation: must be refused
+              geographic=True, rotated=True)  # ModelTransformation: refused
+    write_cog(d / "cogsub.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, subifd=True)  # overviews as SubIFDs (tag 330)
+    write_cog(d / "coghole.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, holes=True)  # cog_merger count-0 hole blocks
     (d / "junk.txt").write_text("this is not a GeoTIFF\n")
     return d
 
@@ -435,6 +469,8 @@ COGALPHA = "cogalpha.tif"  # RGB + alpha band (ExtraSamples), transparent hole
 COGPRED = "cogpred.tif"  # deflate blocks with a horizontal-differencing predictor
 COGMASK = "cogmask.tif"  # 1-bit internal coverage mask (west third no-data)
 COGROT = "cogrot.tif"  # ModelTransformation instead of tiepoint: refused
+COGSUB = "cogsub.tif"  # overviews via SubIFDs (tag 330), empty IFD chain
+COGHOLE = "coghole.tif"  # east block column: count 0 = no-data merger holes
 COGBADCRS = "cogbadcrs.tif"  # geographic EPSG:42304 -> refused
 
 TILE_ZOOM = 14  # one tile covers the whole 4 km fixture footprint

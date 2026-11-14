@@ -11,6 +11,7 @@ pytestmark = pytest.mark.network
 
 COG_SMALL = "https://data.cquest.org/temp/cog4josm/COG_BayonneSudEst.tif"
 COG_BIG = "https://data.cquest.org/temp/cog4josm/Anglet2025_COG.tif"
+COG_MERGED = "https://data.cquest.org/temp/cog4josm/COG_Bayonne_2025b.tif"
 COG_CENTER = (-1.421406, 43.465922)
 
 
@@ -119,6 +120,27 @@ def test_cog_big_smoke(client):
     assert r.status_code == 200
     a = np.asarray(Image.open(io.BytesIO(r.content)))
     assert (a[..., 3] > 0).sum() > 10000
+
+
+def test_cog_merged(client):
+    """5.9 GB cog_merger union of the four Bayonne COGs: BigTIFF, overviews as
+    SubIFDs (tag 330), absent blocks with byte count 0. Pinned behaviors: the
+    overviews are found (fast overview tiles), merger holes are transparent,
+    and they are distinguished from the sources' genuine black fringes."""
+    r = _t(client, f"/c2t/13/4062/2994?u={COG_MERGED}")
+    assert r.status_code == 200
+    a = np.asarray(Image.open(io.BytesIO(r.content)))
+    assert (a[..., 3] > 0).sum() > 10000  # rendered from SubIFD overviews
+    # tile inside the union notch (outside all four sources): fully transparent
+    r = _t(client, f"/c2t/17/65034/47949?u={COG_MERGED}")
+    assert np.asarray(Image.open(io.BytesIO(r.content)))[..., 3].max() == 0
+    # tile straddling the notch over genuine black data: transparent under the
+    # default blackmax, opaque black with blackmax=-1 (hole != black fringe)
+    r = _t(client, f"/c2t/18/130010/95895?u={COG_MERGED}")
+    assert np.asarray(Image.open(io.BytesIO(r.content)))[..., 3].max() == 0
+    r = _t(client, f"/c2t/18/130010/95895?u={COG_MERGED}&blackmax=-1")
+    a = np.asarray(Image.open(io.BytesIO(r.content)))
+    assert (a[..., 3] > 0).sum() > 10000 and a[..., :3][a[..., 3] > 0].max() <= 8
 
 
 # --- remote byte-range proof through a byte-counting relay proxy -----------

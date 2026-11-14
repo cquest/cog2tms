@@ -6,7 +6,8 @@ import pytest
 from app import geotiff as g
 from app import tiles
 from app.httprange import LocalReader
-from .conftest import COG16, COG4326, COGALPHA, COGMASK, COGND, COGROT, fixture_tile
+from .conftest import (COG16, COG4326, COGALPHA, COGHOLE, COGMASK, COGND, COGROT,
+                       COGSUB, W, fixture_tile)
 
 
 def _open(fixtures_dir, name):
@@ -116,3 +117,46 @@ def test_modeltransformation_refused(fixtures_dir):
     are refused at open, not silently read as north-up."""
     with pytest.raises(g.CogError, match="rotated rasters not supported"):
         _open(fixtures_dir, COGROT)
+
+
+def test_subifd_overviews(fixtures_dir):
+    """Overviews can be published through SubIFDs (tag 330) with an empty IFD
+    chain (cog_merger layout): same levels, render pixel-identical."""
+    cog = _open(fixtures_dir, COGSUB)
+    try:
+        assert len(cog.levels) == 2 and not cog.masks
+        assert cog.levels[1].width == W // 2  # the overview was found
+        rgb, valid = tiles.render_tile(cog, *fixture_tile(), 256)
+    finally:
+        cog.close()
+    ref = _open(fixtures_dir, COG4326)
+    try:
+        rrgb, rvalid = tiles.render_tile(ref, *fixture_tile(), 256)
+    finally:
+        ref.close()
+    assert (rgb == rrgb).all() and (valid == rvalid).all()
+
+
+def test_count_zero_blocks_are_holes(fixtures_dir):
+    """cog_merger unions footprints by leaving absent blocks at byte count 0
+    (here the east block column, with a deliberately bogus offset): never
+    fetched, and kept no-coverage -> transparent, not a black smear."""
+    cog = _open(fixtures_dir, COGHOLE)
+    ref = _open(fixtures_dir, COG4326)
+    try:
+        d, v = cog.window(0, 3 * W // 4, 10, 3 * W // 4 + 32, 42)  # holed column
+        assert not v.any() and not d.any()
+        d2, v2 = cog.window(0, 0, 10, 3 * W // 4, 42)  # west of the holes
+        dr, vr = ref.window(0, 0, 10, 3 * W // 4, 42)
+        assert (d2 == dr).all() and v2.all() and vr.all()
+        rgb, valid = tiles.render_tile(cog, *fixture_tile(), 256)
+        rrgb, rvalid = tiles.render_tile(ref, *fixture_tile(), 256)
+    finally:
+        cog.close()
+        ref.close()
+    # the tile's east edge maps to the holed blocks (bogus past-EOF offset):
+    # coverage vanishes there, never exceeds the reference's, and kept pixels
+    # keep their exact colors (renormalization, not a black smear)
+    assert not valid[:, -1].any() and valid[:, :8].all() and rvalid[:, -1].all()
+    assert not (valid & ~rvalid).any()
+    assert (rgb[valid] == rrgb[valid]).all()
