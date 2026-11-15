@@ -34,8 +34,6 @@ GET /healthz   GET /robots.txt   GET /static/…   # health, robots policy, UI a
 - Errors: `400` zoom / index / format / size / URL, 16-bit data without
   `rescale`, unsupported CRS, refused redirect chain; `404` COG unreachable or
   not a GeoTIFF; `502` upstream error.
-- Anti-scraping: `robots.txt` disallows `/c2t`, every response carries
-  `X-Robots-Tag: nofollow, noimageindex` (deters well-behaved crawlers only).
 
 ## Run locally
 

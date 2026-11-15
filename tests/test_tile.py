@@ -24,6 +24,38 @@ def test_anti_scraping(client, server):
         assert client.get(path).headers["x-robots-tag"] == "nofollow, noimageindex"
 
 
+def test_head_requests(client, server, counter):
+    """HEAD answers like the GET (same headers, same cache entry): FastAPI's
+    @app.get() is GET-only, so probes used to get 405 Method Not Allowed."""
+    u = f"{server.base}/{COG4326}"
+    for path in ("/healthz", "/robots.txt", "/static/maplibre-gl.css",
+                 f"/c2t.tms.json?u={u}", f"/c2t/0/0/0.geojson?u={u}"):
+        assert client.head(path).status_code == 200
+    url = tile_url(server, COG4326, *fixture_tile())
+    head, get = client.head(url), client.get(url)
+    assert head.status_code == 200 and get.status_code == 200
+    assert head.headers["content-length"] == str(len(get.content))
+    for k in ("content-type", "cache-control", "x-robots-tag"):
+        assert head.headers[k] == get.headers[k]
+    # the HEAD paid for the render: a following GET leaves the encoded-tile cache
+    # without fetching a single upstream byte
+    served = counter.served
+    assert client.get(url).status_code == 200 and counter.served == served
+
+
+def test_options_methods(client, server):
+    """A bare OPTIONS gets a conformant 405 + Allow; only a CORS preflight is
+    answered, and it covers HEAD as well as GET."""
+    r = client.options(f"/c2t/1/1/1?u={server.base}/{COG4326}")
+    assert r.status_code == 405
+    assert {"GET", "HEAD"} <= set(r.headers["allow"].split(", "))
+    pre = client.options(tile_url(server, COG4326, *fixture_tile()),
+                         headers={"Origin": "https://example.org",
+                                  "Access-Control-Request-Method": "GET"})
+    assert pre.status_code == 200
+    assert set(pre.headers["access-control-allow-methods"].split(", ")) == {"GET", "HEAD"}
+
+
 def test_web_ui(client):
     r = client.get("/")
     assert r.status_code == 200 and r.headers["content-type"] == "text/html; charset=utf-8"

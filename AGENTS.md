@@ -21,6 +21,12 @@ GET /robots.txt                          "User-agent: * Disallow: /c2t" + X-Robo
                                          (nofollow, noimageindex) on every response
 ```
 
+Every GET route also answers **HEAD**: FastAPI's `@app.get()` is GET-only (a bare
+Starlette `Route` would have added HEAD), so `main.py` adds it to each `APIRoute` —
+same handler, same tile-cache key, body suppressed by the ASGI server; health
+checks and `curl -I` probes must not see 405. A bare `OPTIONS` is a conformant
+`405` + `Allow`; only a CORS preflight is answered (`allow_methods`: GET, HEAD).
+
 Errors: `400` (zoom/x/y outside matrix, format, size, URL/scheme, bidx/rescale/
 blackmax, 16-bit data without `rescale`, unsupported CRS, redirect chain refused
 or looping), `404` (unreachable COG, not a GeoTIFF, rotated raster), `502`
@@ -184,6 +190,10 @@ cog2tms/
 │   │                      # pixel-center 1:1 warp, sharpen gating
 │   ├── test_format.py     # webp output + format=auto Accept negotiation
 │   └── test_network.py    # integration on remote COGs (`network` marker) + relay proxy proof
+├── tools/
+│   └── tilebench.py       # standalone CLI benchmark (httpx only, no app imports): walks every
+│                          # displayed tile of a set of COGs → MB/s + tiles/s, --concurrency =
+│                          # simultaneous connections; client-side view of the running service
 ├── Dockerfile             # python:3.12-slim → pip install . → uvicorn --workers 4
 ├── cog2tms.service        # systemd unit: boot + Restart=always, hardened (see README)
 └── README.md
@@ -250,6 +260,13 @@ by a local Range-capable HTTP server that counts bytes. Pinned behaviors (do not
   COG / non-TIFF / rotated raster, `size`/`bidx`, TileJSON/GeoJSON/healthz; the
   same open-error matrix on `.geojson` and `.tms.json`; web UI (`GET /` =
   MapLibre page + vendored assets, `/maplibre` redirects to `/`);
+- **HEAD = GET without the body** on every route (`/healthz`, `robots.txt`,
+  `/static/…`, TileJSON, geojson, tiles): 200, `content-length` equal to the GET
+  payload, identical `content-type`/`Cache-Control`/`X-Robots-Tag`, and a GET
+  right after a HEAD fetches **no** upstream byte (the HEAD paid for the render
+  and shares the tile-cache key). A bare `OPTIONS` → 405 whose `Allow` contains
+  GET and HEAD; a CORS preflight → 200 with
+  `access-control-allow-methods: GET, HEAD`;
 - **URL guardrails**: `ALLOWED_HOSTS` enforced on every request — including one
   served from the encoded-tile cache — and re-checked on every redirect hop;
   `check_url` unit cases (scheme, missing host, unresolvable host, private/

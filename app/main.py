@@ -8,6 +8,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, RedirectResponse, Response
+from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
@@ -23,7 +24,7 @@ from .security import check_url
 from .tiles import EmptyTile, MissingRescale, web_bbox_lonlat
 
 app = FastAPI(title="cog2tms", version=version)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"])
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "HEAD"])
 
 
 @app.middleware("http")
@@ -299,3 +300,12 @@ async def healthz():
 @app.get("/robots.txt")
 async def robots():
     return FileResponse(_STATIC / "robots.txt", media_type="text/plain")
+
+
+# FastAPI's @app.get() answers GET only - a bare Starlette Route would have added
+# HEAD, FastAPI does not: health checks, curl -I and wget --spider all got 405.
+# HEAD runs the same handler (the ASGI server suppresses the body on the wire),
+# and the encoded tile lands under the same cache key as the GET that follows.
+for _route in app.routes:
+    if isinstance(_route, APIRoute) and "GET" in _route.methods:
+        _route.methods.add("HEAD")
