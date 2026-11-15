@@ -30,14 +30,15 @@ or looping), `404` (unreachable COG, not a GeoTIFF, rotated raster), `502`
 
 | Topic | Decision |
 |---|---|
-| Engine | Pure-Python COG reader over `requests` byte-range; images with Pillow+numpy; JPEG-in-TIFF blocks decoded by **simplejpeg** (identical pixels, releases the GIL) with a Pillow fallback; warp/resample by **`cv2.remap`** (opencv-python-headless — the one heavy wheel, accepted for the render win). Small surface, prebuilt wheels only, full control of what is fetched. |
+| Engine | Pure-Python COG reader over **curl_cffi** byte-range (libcurl: HTTP/1.1 and HTTP/2 by ALPN, `HTTP2=0` pins 1.1; bodies bounded by a write callback); images with Pillow+numpy; JPEG-in-TIFF blocks decoded by **simplejpeg** (identical pixels, releases the GIL) with a Pillow fallback; warp/resample by **`cv2.remap`** (opencv-python-headless — the one heavy wheel, accepted for the render win). Small surface, prebuilt wheels only, full control of what is fetched. |
 | Y orientation | **OSM-style XYZ** (Y points down). Pass-through, no flip. A unit test pins the convention. |
 | Out-of-bounds tiles | **200 + empty tile**: fully transparent PNG/WebP (alpha=0); JPEG has no alpha → solid fill, configurable `EMPTY_TILE_BG` (default `0,0,0`). |
 | Output formats | **PNG, JPEG, WebP** + `format=auto` = the `Accept` header only: webp iff `image/webp` (q>0) is listed explicitly, else png; the source codec (JPEG-in-TIFF) plays **no** role. **Wildcards (`image/*`, `*/*`) never select webp** — JOSM and plain clients send them and cannot decode it. WebP = Pillow `exact=True` (without it, RGB is blended to a background where alpha<255) + `method=0`; `WEBP_LOSSLESS=1` → lossless+exact = bit-identical to PNG. The resolved format is part of the tile-cache key. PNG stays the default when `format` is omitted. |
 | Size limit | **No 413 based on Content-Length** (multi-GB COGs are legitimate): validation via magic bytes `II*`/`MM*` + `MAX_ZOOM`. |
 
-Stack: Python 3.12, FastAPI + uvicorn, requests (Range reads), numpy, Pillow,
-simplejpeg, imagecodecs, opencv-python-headless; dev: pytest + pytest-cov + httpx.
+Stack: Python 3.12, FastAPI + uvicorn, curl_cffi (Range reads, h2 by ALPN),
+numpy, Pillow, simplejpeg, imagecodecs, opencv-python-headless; dev: pytest,
+pytest-cov, httpx.
 
 ## Supported COG features (`app/geotiff.py`)
 
@@ -99,6 +100,12 @@ would oversubscribe across uvicorn workers.
   ones per window as a row-major contiguous slice (`_Level.index`).
 - One `read_many` batch per IFD; window blocks in parallel groups, or one
   **multi-range GET** (`multipart/byteranges`) — rejection remembered per host.
+- **Transport = curl_cffi**: one curl handle per thread (`_session`, handles are
+  not thread-safe) fed by one **process-wide range pool** (`_ranges`, 8 workers)
+  so those handles/connections stay warm across renders; h2 by ALPN (`HTTP2=0`
+  pins 1.1). Bodies are read by curl's write callback into a list (≈4.5 ms per
+  256 KB range, vs 12 ms if streamed through a queue) — the same callback is the
+  byte cap, and the header callback supplies the status of an aborted transfer.
 - **Encoded-tile LRU** (`TILE_CACHE`) + per-key `asyncio.Lock` single-flight.
 - **Block decode in `_POOL`** (`DECODE_THREADS`, gated by `_PAR_MIN_PX` = 1 Mpx):
   only GIL-free codecs go there (simplejpeg, zlib, imagecodecs LZW and WebP —
@@ -115,8 +122,10 @@ would oversubscribe across uvicorn workers.
   the first 206/HEAD and kept across reader reopens.
 - Later single-range GETs carry `If-Range` (direct hosts only, never on multi-
   range GETs): a replaced file makes the server answer `200 + whole file` →
-  `CogChanged`, raised **before the body is read**; for servers that ignore
-  `If-Range`, ETag/size drift between responses also raises `CogChanged`.
+  `CogChanged`, recognized **from the response headers** (curl's header callback
+  fires before any body byte) and cut off by the body cap — that answer is never
+  buffered; for servers that ignore `If-Range`, ETag/size drift between
+  responses also raises `CogChanged`.
 - Cached tiles are revalidated by one 1-byte `If-Range` GET at most every
   `VALIDATE_TTL` s; probe failures are ignored — cached bytes keep being served
   (stale-while-error).
@@ -145,14 +154,15 @@ would oversubscribe across uvicorn workers.
 ```
 cog2tms/
 ├── AGENTS.md
-├── pyproject.toml         # fastapi, uvicorn[standard], requests, pillow, numpy, simplejpeg, imagecodecs, opencv-python-headless ; dev: pytest, pytest-cov, httpx
+├── pyproject.toml         # fastapi, uvicorn[standard], curl_cffi, pillow, numpy, simplejpeg, imagecodecs, opencv-python-headless ; dev: pytest, pytest-cov, httpx
 ├── app/
 │   ├── main.py            # routes + error mapping + format negotiation + TileJSON + geojson + CORS
 │   ├── cogpool.py         # LRU/TTL pool of open CogFile + render semaphore
 │   ├── geotiff.py         # TIFF/BigTIFF parser, decoders (simplejpeg, imagecodecs, pure-Python/Pillow fallbacks), window reader
-│   ├── httprange.py       # RangeReader (requests) / LocalReader, range merging,
-│   │                      # retries, negative cache, ETag/If-Range version anchors,
-│   │                      # own 30x walking with check_url on every Location
+│   ├── httprange.py       # RangeReader (curl_cffi, thread-local handles) / LocalReader,
+│   │                      # range merging, bounded retries, negative cache, ETag/If-Range
+│   │                      # version anchors, body caps (header + write callbacks), own 30x
+│   │                      # walking with check_url on every Location
 │   ├── tiles.py           # XYZ math, overview pick, warp grid, bilinear sampler
 │   ├── crs.py             # pure-Python CRS math + minimal EPSG table
 │   ├── empty.py           # memoized empty PNG/JPEG/WebP tiles
@@ -164,7 +174,7 @@ cog2tms/
 │   ├── conftest.py        # pure-Python COG writer + Range server with byte counter
 │   ├── test_tile.py       # offline unit tests + endpoint error matrix + URL guardrails
 │   ├── test_crs.py        # PROJ golden values (forward/inverse), geokeys dispatch
-│   ├── test_ranges.py     # local byte-range proof (bytes served, Range-only)
+│   ├── test_ranges.py     # local byte-range proof (bytes served, Range-only, body cap)
 │   ├── test_multirange.py # multi-range support + per-host fallback learning
 │   ├── test_retries.py    # fault injection: 429/5xx retries, negative cache
 │   ├── test_versions.py   # coherence when the COG is replaced under one URL
@@ -265,7 +275,10 @@ by a local Range-capable HTTP server that counts bytes. Pinned behaviors (do not
   (no halo on the footprint edge), and level-0 tiles are byte-identical
   whatever `SHARPEN` is set to;
 - **byte-range proof**: served bytes ≪ file size, every upstream request has
-  `Range:`; multi-range fallback learned per host;
+  `Range:`; multi-range fallback learned per host; a range request answered 200
+  (whole file) is cut off at once — the reader fails fast and only a few KB of
+  that body ever arrive, and no `Accept-Encoding` is advertised (a transparently
+  inflated body would break our Content-Range bookkeeping);
 - **codecs**: JPEG-in-TIFF renders like the deflate fixture and stays north-up;
   simplejpeg vs Pillow parity (≤ 2 levels); imagecodecs LZW/PackBits blocks
   byte-exact, including the **libtiff LZW variant** (our pure-Python decoder
@@ -308,16 +321,33 @@ by a local Range-capable HTTP server that counts bytes. Pinned behaviors (do not
   (count-0 holes), adjacent black-fringe tile transparent by default and
   opaque black with `blackmax=-1` (hole ≠ black fringe);
 - **remote byte-range**: counting relay proxy in front of COG_SMALL →
-  transferred < 1 % of file, no upstream request without `Range:`.
+  transferred < 1 % of file, no upstream request without `Range:`;
+- **protocol parity**: the same z13 tile rendered with `HTTP2=1` and `HTTP2=0`
+  is byte-identical, and the wire version (`RangeReader.proto`) is asserted to
+  be 3 then 2 — the test fails loudly instead of comparing h1 with h1.
 
 ## Status
 
 Roadmap 1–4 done (skeleton/PNG/pool; JPEG/bidx/rescale/geojson/TileJSON/
 healthz/CORS; anti-SSRF + fixtures + network tests; Docker + README + public-
-COG verification), plus WebP and `format=auto` on top.
+COG verification), plus WebP and `format=auto` on top, then the sharpness fix
+(pixel-center sampling + unsharp) and the transport swap to curl_cffi (HTTP/2
+by ALPN, capped bodies).
 
 ## Follow-ups
 
+- **Transport, still open** (`~/.opencode/plan/cog2tms-curl-cffi-h3.md`, h2 part
+  implemented — the h3 half is measured and still parked): HTTP/3 only when a
+  host sends `Alt-Svc: h3=` (none of the four reference COGs does, and UDP/443
+  is filtered here → `ERR_HANDSHAKE_TIMEOUT`); `curl_share` so parallel single-
+  range GETs multiplex on one h2 connection instead of one handle per range
+  thread; `dns=` pinning of the address `check_url` already resolved (closes the
+  resolve→connect race). Honest measurement: over the default multi-range path,
+  h2 vs pinned h1.1 is a wash on the reference COG (z13/z16/z18 medians within
+  ±5 %) — the ×12 once measured on 8 concurrent ranges is already collapsed by
+  the multi-range GET. Option A (`~/.opencode/plan/cog2tms-http2.md`,
+  urllib3[h2]) is superseded: it stalled at 8 concurrent reads and
+  `BaseHTTPResponse.stream()` raises `NotImplementedError` under h2.
 - **On hold (probed + planned**, `~/.opencode/plan/cog2tms-passthrough.md`):
   byte-passthrough of JPEG-in-TIFF blocks (tier B rewrap, tier A raw copy) and
   `quality=src` via DQT estimation. Rejected for `auto`: webp is smaller than a

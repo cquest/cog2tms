@@ -1,12 +1,11 @@
-"""Bounded transparent retries (urllib3) and negative caching of remote
-404/403: fault-injection servers, no real network."""
+"""Bounded transparent retries (httprange's own loop: 429 + 5xx, Retry-After)
+and negative caching of remote 404/403: fault-injection servers, no real network."""
 import socketserver
 import threading
 import time
 
 import http.server
 import pytest
-import requests
 
 from app import config
 from app.httprange import CogFetch, CogNotFound, RangeReader, _negative
@@ -88,7 +87,7 @@ def test_persistent_5xx_bounded():
     srv, h, url = _serve([503] * 20)
     try:
         r = RangeReader(url)
-        with pytest.raises(requests.RequestException):  # urllib3 RetryError
+        with pytest.raises(CogFetch):  # bounded: attempts then upstream error
             r.read(0, 10)
         assert len(h.log) == config.HTTP_RETRIES + 1  # attempt + bounded retries
     finally:

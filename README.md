@@ -104,6 +104,7 @@ LRU with single-flight locks): [AGENTS.md](AGENTS.md).
 | `HEAD_PREFETCH` | `65536` | bulk head read (bytes) absorbing IFD/tag parsing at open (`0` disables) |
 | `HTTP_CONNECT_TIMEOUT` / `HTTP_READ_TIMEOUT` | `10` / `30` | upstream timeouts (s) |
 | `HTTP_RETRIES` / `HTTP_BACKOFF` | `2` / `0.3` | transparent retries on 429/5xx (`0` disables) |
+| `HTTP2` | `1` | HTTP/2 to hosts offering it (ALPN); `0` pins HTTP/1.1 |
 | `NEGATIVE_TTL` | `30` | a remote 404/403 short-circuits that COG for this long (`0` disables) |
 | `VALIDATE_TTL` | `30` | seconds between two `If-Range` version checks (`-1` disables) |
 | `VALIDATE_TIMEOUT` | `5` | timeout (s) of that version check |

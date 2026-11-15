@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
-    "requests>=2.31",
+    "curl_cffi>=0.17",  # HTTP byte-range client: h2/h3 by ALPN, capped bodies
     "pillow>=10",
     "numpy>=1.26",
     "simplejpeg>=1.6",

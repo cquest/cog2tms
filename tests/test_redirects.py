@@ -60,9 +60,6 @@ def _clean_state():
     clear_caches()
     for d in (hr._negative, hr._versions, hr._checked, hr._host_multi, hr._resolved):
         d.clear()
-    if hr._vsession is not None:
-        hr._vsession.close()
-        hr._vsession = None
 
 
 def test_two_hops_render_like_direct_access(tmp_path):

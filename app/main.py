@@ -5,7 +5,6 @@ from io import BytesIO
 from pathlib import Path
 
 import numpy as np
-import requests
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, RedirectResponse, Response
@@ -126,8 +125,6 @@ async def _open(u: str):
             raise HTTPException(404, "COG not found")
         except CogFetch as e:
             raise HTTPException(502, f"upstream error: {e}")
-        except requests.RequestException as e:
-            raise HTTPException(502, f"upstream error: {e.__class__.__name__}")
         except CogError as e:
             raise HTTPException(404, f"not a readable GeoTIFF: {e}")
         except UnsupportedCRS as e:
@@ -194,7 +191,7 @@ async def _revalidate(u: str):
         await asyncio.to_thread(revalidate, u)
     except CogChanged:
         _purge(u)
-    except (CogNotFound, CogFetch, requests.RequestException):
+    except (CogNotFound, CogFetch):
         pass
 
 
@@ -230,7 +227,7 @@ async def _render(u: str, z: int, x: int, y: int, format: str, quality: int,
         raise HTTPException(400, str(e))
     except CogNotFound:
         raise HTTPException(502, "COG vanished")
-    except (CogFetch, requests.RequestException) as e:
+    except CogFetch as e:
         raise HTTPException(502, f"upstream error: {e}")
     return _encode(rgb, valid, format, quality)
 

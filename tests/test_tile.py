@@ -38,12 +38,12 @@ def test_web_ui(client):
 
 def test_upstream_user_agent():
     """Upstream COG servers must see "cog2tms/<version>" (a contact URL may
-    follow), not python-requests."""
+    follow), not the curl/requests default."""
     from app import __version__
-    from app.httprange import USER_AGENT, RangeReader
+    from app.httprange import USER_AGENT, RangeReader, _session
     assert USER_AGENT.startswith(f"cog2tms/{__version__}")
-    r = RangeReader("https://invalid.invalid/x.tif")
-    assert r._s.headers["User-Agent"] == USER_AGENT
+    RangeReader("https://invalid.invalid/x.tif")  # readers hold no session of their own
+    assert _session().headers["User-Agent"] == USER_AGENT
 
 
 def test_center_tile_png(client, server):

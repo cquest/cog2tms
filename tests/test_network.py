@@ -2,8 +2,8 @@
 import io
 import threading
 
+import httpx
 import pytest
-import requests
 from PIL import Image
 import numpy as np
 
@@ -190,7 +190,7 @@ class _CountingRelay:
                 if self.headers.get("Range"):
                     hdr["Range"] = self.headers["Range"]
                 relay.ranged.append(bool(hdr))
-                r = requests.get(relay.remote, headers=hdr, timeout=60)
+                r = httpx.get(relay.remote, headers=hdr, timeout=60)
                 body = r.content
                 relay.served += len(body)
                 self.send_response(r.status_code)
@@ -218,5 +218,35 @@ def test_remote_byte_range(client):
         assert r.status_code == 200
         assert proxy.served < 20 * 1024 * 1024, f"too many bytes: {proxy.served}"
         assert all(proxy.ranged), "a request reached upstream without Range"
-    file_size = requests.head(COG_SMALL, timeout=30).headers["Content-Length"]
+    file_size = httpx.head(COG_SMALL, timeout=30).headers["Content-Length"]
     assert proxy.served * 100 < int(file_size)  # < 1 % of the file
+
+
+def test_http2_parity(client, monkeypatch):
+    """Negotiating HTTP/2 must not move a pixel — and the wire version must
+    really be the one asked for, else this would silently compare h1 with h1."""
+    from app import config, httprange
+    from app.httprange import RangeReader
+    from app.main import clear_caches, pool
+    path = f"/c2t/13/4063/2995?u={COG_SMALL}&blackmax=-1"
+
+    def render():
+        pool.clear()
+        clear_caches()
+        for d in (httprange._versions, httprange._checked, httprange._host_multi):
+            d.clear()
+        tile = _t(client, path)
+        assert tile.status_code == 200
+        rd = RangeReader(COG_SMALL)
+        try:
+            rd.read(0, 16)
+        finally:
+            rd.close()
+        return tile.content, rd.proto
+
+    monkeypatch.setattr(config, "HTTP2", True)
+    h2, proto_h2 = render()
+    monkeypatch.setattr(config, "HTTP2", False)
+    h1, proto_h1 = render()
+    assert (proto_h2, proto_h1) == (3, 2)  # h2 negotiated, then pinned to 1.1
+    assert h2 == h1

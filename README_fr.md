@@ -104,6 +104,7 @@ décodage threadé, LRU de tuiles avec verrous single-flight) :
 | `HEAD_PREFETCH` | `65536` | lecture en bloc de l'en-tête (octets) absorbant l'analyse IFD/balises à l'ouverture (`0` désactive) |
 | `HTTP_CONNECT_TIMEOUT` / `HTTP_READ_TIMEOUT` | `10` / `30` | délais d'attente amont (s) |
 | `HTTP_RETRIES` / `HTTP_BACKOFF` | `2` / `0,3` | retries transparents sur 429/5xx (`0` désactive) |
+| `HTTP2` | `1` | HTTP/2 vers les hôtes qui le proposent (ALPN) ; `0` épingle HTTP/1.1 |
 | `NEGATIVE_TTL` | `30` | un 404/403 à distance court-circuite ce COG pendant cette durée (`0` désactive) |
 | `VALIDATE_TTL` | `30` | secondes entre deux vérifications de version `If-Range` (`-1` désactive) |
 | `VALIDATE_TIMEOUT` | `5` | délai d'attente (s) de cette vérification de version |

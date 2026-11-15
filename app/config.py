@@ -10,6 +10,9 @@ EMPTY_TILE_BG = tuple(int(v) for v in os.getenv("EMPTY_TILE_BG", "0,0,0").split(
 HTTP_CONNECT_TIMEOUT = float(os.getenv("HTTP_CONNECT_TIMEOUT", "10"))
 HTTP_READ_TIMEOUT = float(os.getenv("HTTP_READ_TIMEOUT", "30"))
 
+# HTTP/2 (ALPN) for remote COG reads; 0 pins HTTP/1.1
+HTTP2 = os.getenv("HTTP2", "1") == "1"
+
 # transparent retries on transient upstream failures (429 + 5xx, honoring
 # Retry-After, exponential backoff); 0 disables
 HTTP_RETRIES = int(os.getenv("HTTP_RETRIES", "2"))
