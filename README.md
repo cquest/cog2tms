@@ -21,6 +21,8 @@ GET /c2t/{z}/{x}/{y}?u=<COG url>[&format=png|jpeg|webp|auto][&quality=80][&size=
 GET /c2t/{z}/{x}/{y}.geojson?u=<COG url>   # COG footprint (debug)
 GET /c2t.tms.json?u=<COG url>              # TileJSON (bbox, minzoom/maxzoom)
 GET /healthz   GET /robots.txt   GET /static/…   # health, robots policy, UI assets
+GET /openapi.json   GET /docs   GET /redoc       # OpenAPI 3.1 + docs (swagger-ui from a CDN)
+# every route above also answers HEAD: same headers, no body
 ```
 
 - XYZ (OSM/Leaflet numbering, y-down). Formats: PNG (RGBA), JPEG, WebP
@@ -43,7 +45,7 @@ pip install -e ".[dev]"
 uvicorn app.main:app --reload --port 3857
 ```
 
-The web UI at `http://127.0.0.1:3857/` takes a COG URL and shows a MapLibre
+The web UI at `http://127.0.0.1:3857/` takes a COG URL and shows a map
 preview plus ready-to-paste tile URLs. From the shell (public example
 orthophoto, EPSG:3943):
 

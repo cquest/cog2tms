@@ -1,5 +1,6 @@
 """Offline unit tests: fixture COGs served locally over HTTP byte-range."""
 import io
+import warnings
 
 import numpy as np
 import pytest
@@ -25,15 +26,20 @@ def test_anti_scraping(client, server):
 
 
 def test_head_requests(client, server, counter):
-    """HEAD answers like the GET (same headers, same cache entry): FastAPI's
-    @app.get() is GET-only, so probes used to get 405 Method Not Allowed."""
+    """HEAD answers like the GET (same headers, same cache entry) with an empty
+    body: FastAPI's @app.get() is GET-only, so probes used to get 405 Method Not
+    Allowed, and no ASGI server strips the body for us."""
     u = f"{server.base}/{COG4326}"
     for path in ("/healthz", "/robots.txt", "/static/maplibre-gl.css",
                  f"/c2t.tms.json?u={u}", f"/c2t/0/0/0.geojson?u={u}"):
-        assert client.head(path).status_code == 200
+        r = client.head(path)
+        # the file paths stream several chunks: all of them must be swallowed
+        assert r.status_code == 200 and r.content == b""
     url = tile_url(server, COG4326, *fixture_tile())
     head, get = client.head(url), client.get(url)
     assert head.status_code == 200 and get.status_code == 200
+    assert head.content == b""  # our middleware, not the server: uvicorn httptools
+    # content-length still describes the GET payload the client would have got
     assert head.headers["content-length"] == str(len(get.content))
     for k in ("content-type", "cache-control", "x-robots-tag"):
         assert head.headers[k] == get.headers[k]
@@ -45,7 +51,8 @@ def test_head_requests(client, server, counter):
 
 def test_options_methods(client, server):
     """A bare OPTIONS gets a conformant 405 + Allow; only a CORS preflight is
-    answered, and it covers HEAD as well as GET."""
+    answered, and it covers HEAD as well as GET. HEAD itself is not a declared
+    route method (see test_head_requests): the Allow header says so anyway."""
     r = client.options(f"/c2t/1/1/1?u={server.base}/{COG4326}")
     assert r.status_code == 405
     assert {"GET", "HEAD"} <= set(r.headers["allow"].split(", "))
@@ -56,6 +63,33 @@ def test_options_methods(client, server):
     assert set(pre.headers["access-control-allow-methods"].split(", ")) == {"GET", "HEAD"}
 
 
+def test_openapi_spec(client):
+    """The generated document is what a client generator consumes: valid (no
+    duplicate operationId - a documented HEAD twin per route would add one),
+    honest about the image media types and our error contract, and it leaves the
+    web UI out."""
+    from app.main import app
+    app.openapi_schema = None  # regenerate now, so the warnings below are real
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        spec = client.get("/openapi.json").json()
+    assert not [w for w in seen if "Duplicate Operation" in str(w.message)]
+    ids = [op["operationId"] for ops in spec["paths"].values() for op in ops.values()
+           if "operationId" in op]
+    assert len(ids) == len(set(ids)) > 0
+    tile = spec["paths"]["/c2t/{z}/{x}/{y}"]["get"]
+    assert set(tile["responses"]["200"]["content"]) == {"image/png", "image/jpeg", "image/webp"}
+    assert {"400", "404", "502"} <= set(tile["responses"])
+    assert tile["tags"] == ["tiles"]
+    query = [p for p in tile["parameters"] if p["in"] == "query"]
+    assert {p["name"] for p in query} == {"u", "format", "quality", "bidx", "rescale",
+                                          "blackmax", "size"}
+    assert all(p.get("description") for p in query)
+    assert "/" not in spec["paths"]  # the web UI is not part of the documented api
+    for page in ("/docs", "/redoc"):  # kept public: schema + browsable documentation
+        assert client.get(page).status_code == 200
+
+
 def test_web_ui(client):
     r = client.get("/")
     assert r.status_code == 200 and r.headers["content-type"] == "text/html; charset=utf-8"
@@ -64,8 +98,6 @@ def test_web_ui(client):
                   "/static/josm.svg"):
         assert client.get(asset).status_code == 200
     assert client.get("/static/nope.js").status_code == 404
-    r = client.get("/maplibre", follow_redirects=False)  # old url kept
-    assert r.status_code in (301, 302, 307) and r.headers["location"] == "/"
 
 
 def test_upstream_user_agent():

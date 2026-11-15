@@ -7,8 +7,7 @@ from pathlib import Path
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse, RedirectResponse, Response
-from fastapi.routing import APIRoute
+from fastapi.responses import JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
@@ -23,8 +22,70 @@ from .httprange import (CogChanged, CogFetch, CogNotFound, CogRedirect, forget,
 from .security import check_url
 from .tiles import EmptyTile, MissingRescale, web_bbox_lonlat
 
-app = FastAPI(title="cog2tms", version=version)
+app = FastAPI(
+    title="cog2tms", version=version,
+    description="Cloud-Optimized GeoTIFF in, EPSG:3857 XYZ (OSM numbering, y-down) "
+                "tiles out: pixels are read from the remote COG by HTTP byte-range "
+                "requests only, never the whole file. The machine-readable contract "
+                "of a single COG is its TileJSON, `/c2t.tms.json?u=…`.",
+    openapi_tags=[{"name": "tiles", "description": "rendered tile images"},
+                  {"name": "metadata", "description": "footprint and TileJSON of a COG"},
+                  {"name": "ops", "description": "liveness probe and robots policy"}])
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "HEAD"])
+
+
+class _HeadAsGet:
+    """HEAD means the same route, minus the body. FastAPI's @app.get() is GET-only
+    (a bare Starlette Route would have added HEAD), and putting HEAD into
+    route.methods instead documents a HEAD twin per route with a duplicate
+    operationId - so the router only ever sees a GET.
+
+    Dropping the body is ours to do: h11 does it for us, uvicorn's httptools path
+    (the default of uvicorn[standard], so the Docker image) does not - it writes
+    the whole tile after the headers of a HEAD, which desynchronises a keep-alive
+    connection. Content-Length stays as the GET would have declared it, and the
+    answer is still produced in full: the tile is rendered and cached, so the GET
+    that follows a HEAD fetches nothing upstream."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        head = scope["method"] == "HEAD"
+        if head:
+            # a copy: uvicorn keeps its own "HEAD" in its scope, so its access log
+            # does not report a GET
+            scope = dict(scope, method="GET")
+
+        async def forward(message):
+            if message["type"] == "http.response.start":
+                message = _honest_allow(message)
+            elif head:
+                if message.get("more_body"):
+                    return  # swallowed, but the app keeps going: same cache entry
+                message = {"type": "http.response.body", "body": b""}
+            await send(message)
+
+        await self.app(scope, receive, forward)
+
+
+def _honest_allow(message: dict) -> dict:
+    """A 405 must not deny HEAD in its Allow header when HEAD works: Starlette
+    builds that header from route.methods, and HEAD is deliberately not declared
+    there (see _HeadAsGet). Only ever touches a GET-only answer."""
+    if message["status"] != 405:
+        return message
+    headers = list(message["headers"])
+    for i, (name, value) in enumerate(headers):
+        if name.lower() == b"allow" and b"get" in value.lower() and b"head" not in value.lower():
+            headers[i] = (name, value + b", HEAD")
+    return {**message, "headers": headers}
+
+
+app.add_middleware(_HeadAsGet)
 
 
 @app.middleware("http")
@@ -45,6 +106,21 @@ MIME = {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}
 CACHE = {"Cache-Control": "public, max-age=86400"}
 _tiles_cache: OrderedDict[str, bytes] = OrderedDict()
 _inflight: dict[str, asyncio.Lock] = {}
+
+
+def _err(code: int, why: str) -> dict:
+    """One error of the OpenAPI schema: every failure path raises HTTPException,
+    so the body is always {"detail": "..."}."""
+    return {code: {"description": why,
+                   "content": {"application/json": {"schema": {
+                       "type": "object", "properties": {"detail": {"type": "string"}}}}}}}
+
+
+_ERRORS = {**_err(400, "zoom/x/y outside the matrix, bad format or size, refused url or "
+                       "scheme, bad bidx/rescale/blackmax, 16-bit data without rescale, "
+                       "unsupported CRS, refused or looping redirect chain"),
+           **_err(404, "COG unreachable, not a GeoTIFF, rotated raster"),
+           **_err(502, "upstream error")}
 
 
 def clear_caches():
@@ -132,19 +208,41 @@ async def _open(u: str):
             raise HTTPException(400, str(e))
 
 
-@app.get("/c2t/{z}/{x}/{y}.geojson")
-async def footprint(z: int, x: int, y: int, u: str = Query(...)):
-    """COG footprint as a lon/lat polygon (debug helper)."""
+@app.get("/c2t/{z}/{x}/{y}.geojson", tags=["metadata"], summary="COG footprint ring",
+         responses={200: {"description": "GeoJSON Feature polygon, lon/lat degrees "
+                                         "(z/x/y are ignored: always the footprint)",
+                          "content": {"application/json": {}}}, **_ERRORS})
+async def footprint(z: int, x: int, y: int,
+                    u: str = Query(..., description="COG url (http/https)")):
+    """Remote COG footprint as a lon/lat geojson polygon (debug helper)."""
     cog = await _open(u)
     ring = cog.footprint_lonlat()
     return JSONResponse({"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [ring]},
                          "properties": {"crs": cog.crs_name, "url": u}})
 
 
-@app.get("/c2t/{z}/{x}/{y}")
-async def tile(z: int, x: int, y: int, u: str = Query(...), format: str = "png",
-               quality: int = 80, bidx: str | None = None, rescale: str | None = None,
-               blackmax: str | None = None, size: int = 256, request: Request = None):
+@app.get("/c2t/{z}/{x}/{y}", tags=["tiles"], summary="One tile of the COG",
+         response_class=Response,
+         responses={200: {"description": "image in the negotiated format; a tile fully "
+                                         "outside the COG is 200 + empty (transparent "
+                                         "png/webp, solid jpeg for jpeg)",
+                          "content": {m: {} for m in MIME.values()}}, **_ERRORS})
+async def tile(z: int, x: int, y: int,
+               u: str = Query(..., description="COG url (http/https) on an allowed host"),
+               format: str = Query("png", description="png | jpeg | webp | auto - auto trusts "
+                                                      "only the Accept header: webp iff image/webp is "
+                                                      "listed explicitly with q>0, never on wildcards"),
+               quality: int = Query(80, description="jpeg/webp quality, clamped to 1..95"),
+               bidx: str | None = Query(None, description="1-based bands to render, e.g. 1,2,3"),
+               rescale: str | None = Query(None, description="min,max in source units; required "
+                                                             "for 16-bit data"),
+               blackmax: str | None = Query(None, description="pixels whose brightest band is at or "
+                                                              "below this become no-coverage; default "
+                                                              "20, -1 disables"),
+               size: int = Query(256, description="tile edge in pixels, 1..1024"),
+               request: Request = None):
+    """One tile of the COG: a square image in the requested format and size,
+    addressed on the OSM/XYZ grid (z/x/y, y points down - not TMS)."""
     if not 0 <= z <= config.MAX_ZOOM:
         raise HTTPException(400, "bad zoom")
     n = 1 << z
@@ -266,8 +364,12 @@ def _encode(rgb: np.ndarray, valid: np.ndarray, fmt: str, quality: int) -> bytes
     return buf.getvalue()
 
 
-@app.get("/c2t.tms.json")
-async def tilejson(u: str = Query(...)):
+@app.get("/c2t.tms.json", tags=["metadata"], summary="TileJSON of the COG",
+         responses={200: {"description": "TileJSON 2.2.0: lon/lat bbox and the zoom range "
+                                         "where the COG holds its native resolution",
+                          "content": {"application/json": {}}}, **_ERRORS})
+async def tilejson(u: str = Query(..., description="COG url (http/https)")):
+    """Returns the TileJSON describing the remote trnaformed COG."""
     cog = await _open(u)
     bbox = web_bbox_lonlat(cog.web_bbox())
     gsd = cog.psx * cog.unit_m
@@ -282,30 +384,18 @@ async def tilejson(u: str = Query(...)):
     })
 
 
-@app.get("/")
+@app.get("/", include_in_schema=False)  # the web UI is a viewer, not part of the api
 async def index():
     return FileResponse(_STATIC / "maplibre.html", media_type="text/html")
 
 
-@app.get("/maplibre")
-async def maplibre():
-    return RedirectResponse("/")
-
-
-@app.get("/healthz")
+@app.get("/healthz", tags=["ops"], summary="liveness probe")
 async def healthz():
     return {"status": "ok"}
 
 
-@app.get("/robots.txt")
+@app.get("/robots.txt", tags=["ops"], response_class=FileResponse,
+         summary="robots policy for this service",
+         responses={200: {"description": "disallows /c2t", "content": {"text/plain": {}}}})
 async def robots():
     return FileResponse(_STATIC / "robots.txt", media_type="text/plain")
-
-
-# FastAPI's @app.get() answers GET only - a bare Starlette Route would have added
-# HEAD, FastAPI does not: health checks, curl -I and wget --spider all got 405.
-# HEAD runs the same handler (the ASGI server suppresses the body on the wire),
-# and the encoded tile lands under the same cache key as the GET that follows.
-for _route in app.routes:
-    if isinstance(_route, APIRoute) and "GET" in _route.methods:
-        _route.methods.add("HEAD")
