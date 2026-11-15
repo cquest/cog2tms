@@ -17,6 +17,7 @@ const BG_STYLE = {version: 8, sources: {},
 const pageDir = () => location.href.replace(/[^/]*$/, "");
 
 let map, info = null, fpData = null;  // info: c2t.tms.json payload
+let styleReady = false;  // layers may be added again after the last style.load
 
 const cogUrl = () => $("url").value.trim();
 
@@ -74,7 +75,12 @@ async function load() {
 
 // (re)build the cog raster source + footprint line layer on the current style
 function ensureOverlays() {
-  if (!info || !map.isStyleLoaded()) return;  // style.load will call us again
+  // Readiness comes from the style.load event, not from isStyleLoaded(): that
+  // one also waits for every source tile manager, and style.load does **not**
+  // fire again once the remote basemap's vector tiles land — gating on it made
+  // ensureOverlays a silent no-op after setStyle(BASE_STYLE), so the basemap
+  // came back alone and hid the cog2tms raster.
+  if (!info || !styleReady) return;
   for (const id of ["cog", "fp"]) {
     if (map.getLayer(id)) map.removeLayer(id);
     if (map.getSource(id)) map.removeSource(id);
@@ -201,7 +207,7 @@ map = new maplibregl.Map({
   ...(savedView ?? {center: [2.4, 46.6], zoom: 5}),
 });
 map.addControl(new maplibregl.NavigationControl({showCompass: false}), "top-right");
-map.on("style.load", ensureOverlays);  // re-add overlays after every setStyle
+map.on("style.load", () => { styleReady = true; ensureOverlays(); });  // re-add overlays after every setStyle
 
 // quality applies to jpeg and webp (auto resolves to webp or png depending on
 // the browser's Accept header, so it stays useful under auto); blackmax
@@ -218,7 +224,11 @@ for (const f of FIELDS) $(f).addEventListener("change", () => {
   if (f === "format") syncFormatControls();  // before rebuild: disabled controls drop out of the urls
   if (info) { ensureOverlays(); setUrls(); share(); }
 });
-$("base").addEventListener("change", () => { map.setStyle($("base").checked ? BASE_STYLE : BG_STYLE); share(); });
+$("base").addEventListener("change", () => {
+  styleReady = false;  // setStyle drops our layers; style.load re-arms the readiness
+  map.setStyle($("base").checked ? BASE_STYLE : BG_STYLE);
+  share();
+});
 $("opacity").addEventListener("input", () => {
   if (map.getLayer("cog")) map.setPaintProperty("cog", "raster-opacity", $("opacity").value / 100);
   share();
