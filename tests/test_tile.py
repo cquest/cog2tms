@@ -99,6 +99,7 @@ def test_web_ui(client):
                   "/static/josm.svg"):
         assert client.get(asset).status_code == 200
     assert client.get("/static/nope.js").status_code == 404
+    assert client.get("/maplibre").status_code == 404  # route removed: / serves the UI
 
 
 def test_upstream_user_agent():

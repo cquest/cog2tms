@@ -22,7 +22,6 @@ def _t(client, path):
 
 def test_web_ui(client):
     assert _t(client, "/").status_code == 200
-    assert _t(client, "/maplibre").status_code == 200  # redirect, followed
     assert _t(client, "/static/maplibre_app.js").status_code == 200
 
 
