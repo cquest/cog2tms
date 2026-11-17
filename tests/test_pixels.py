@@ -1,6 +1,9 @@
-"""Pixel semantics beyond plain RGB8: 16-bit + rescale, GDAL nodata, ExtraSamples
-alpha, the sliced fetch of big TileOffsets/TileByteCounts arrays, the sharpen
-gating, and the pixel-center 1:1 warp convention."""
+"""Pixel semantics beyond plain RGB8: 16-bit + rescale, GDAL nodata, SampleFormat
+(signed/float pixels, NaN no-data), ExtraSamples alpha, the sliced fetch of big
+TileOffsets/TileByteCounts arrays, the sharpen gating, and the pixel-center 1:1
+warp convention."""
+import math
+
 import cv2
 import numpy as np
 import pytest
@@ -9,8 +12,9 @@ from app import config
 from app import geotiff as g
 from app import tiles
 from app.httprange import LocalReader
-from .conftest import (COG16, COG4326, COGALPHA, COGHOLE, COGMASK, COGND, COGROT,
-                       COGSUB, W, fixture_tile, write_cog)
+from .conftest import (COG12, COG16, COG4326, COGALPHA, COGCX, COGF32, COGFP2,
+                       COGHOLE, COGI8, COGI16, COGMASK, COGND, COGNDJUNK, COGNDNEG,
+                       COGPRED3, COGROT, COGSUB, W, fixture_tile, write_cog)
 
 
 def _open(fixtures_dir, name):
@@ -59,6 +63,81 @@ def test_nodata_fixture(fixtures_dir):
         assert valid.all()  # the red square keeps its zero channels
     finally:
         cog.close()
+
+
+def test_nodata_out_of_range_renders(fixtures_dir):
+    """GDAL_NODATA=-9999 declared on unsigned 8-bit samples: no pixel can hold
+    that value, so it matches nothing and the tile renders - a reader must not
+    raise (numpy 2 casts refuse, they do not wrap)."""
+    cog = _open(fixtures_dir, COGNDNEG)
+    try:
+        assert cog.nodata == [-9999.0]
+        data, valid = cog.window(0, 0, 0, 4, 4)
+        assert data.dtype == np.uint8 and valid.all()
+    finally:
+        cog.close()
+
+
+def test_int16_signed_nodata(fixtures_dir):
+    """SampleFormat 2 (signed) with bps 16: the DEM's -9999 sentinel becomes
+    no-coverage while the rest keeps its values, and rescale=0,255 restores the
+    8-bit fixture pixel-for-pixel."""
+    cog = _open(fixtures_dir, COGI16)
+    try:
+        assert cog.levels[0].dtype == "<i2"
+        data, valid = cog.window(0, 0, 0, 4, 4)
+        assert data.dtype == np.int16 and data[0, 0, 0] == -9999
+        assert not valid[:, 0].any() and valid[:, 1:].all()
+        with pytest.raises(tiles.MissingRescale):
+            tiles.render_tile(cog, *fixture_tile(), 256)
+        rgb, valid = tiles.render_tile(cog, *fixture_tile(16), 256, rescale=(0.0, 255.0))
+    finally:
+        cog.close()
+    ref = _open(fixtures_dir, COG4326)
+    try:
+        rrgb, rvalid = tiles.render_tile(ref, *fixture_tile(16), 256)
+    finally:
+        ref.close()
+    assert valid.all() and rvalid.all()
+    # the gray bands carry the red channel of the RGB fixture (its blue is 0)
+    assert (rgb[..., 0] == rrgb[..., 0]).all()
+
+
+def test_int8_requires_rescale(fixtures_dir):
+    """SampleFormat 2 with bps 8: signed bytes are not something Pillow can
+    encode, so the rescale gate must catch them - not only multi-byte samples."""
+    with pytest.raises(tiles.MissingRescale):
+        _render(fixtures_dir, COGI8)
+
+
+def test_float32_nan_nodata(fixtures_dir):
+    """float32 samples (SampleFormat 3) with GDAL_NODATA="nan": the sentinel
+    column is no-coverage. A NaN nodata can never be found by == (NaN != NaN),
+    it needs an isnan test; and floats stay without a natural range, so the
+    render still demands rescale=min,max."""
+    cog = _open(fixtures_dir, COGF32)
+    try:
+        assert math.isnan(cog.nodata[0])
+        data, valid = cog.window(0, 0, 0, 4, 4)
+        assert data.dtype == np.float32 and math.isnan(data[0, 0, 0])
+        assert not valid[:, 0].any() and valid[:, 1:].all()
+        with pytest.raises(tiles.MissingRescale):
+            tiles.render_tile(cog, *fixture_tile(), 256)
+    finally:
+        cog.close()
+
+
+@pytest.mark.parametrize("name,why", [(COG12, r"BitsPerSample 12"),
+                                      (COGCX, r"SampleFormat 4"),
+                                      (COGPRED3, r"predictor 3"),
+                                      (COGFP2, r"predictor 2 needs"),
+                                      (COGNDJUNK, r"bad GDAL_NODATA")])
+def test_unreadable_samples_refused_at_open(fixtures_dir, name, why):
+    """Depths, encodings and sentinel declarations we cannot honour are refused
+    when the file opens: bps 12 used to fall back to 8-bit silently, which
+    renders wrong pixels, and a sentinel read as 0.0 would eat real coverage."""
+    with pytest.raises(g.CogError, match=why):
+        _open(fixtures_dir, name)
 
 
 def test_extra_samples_alpha(fixtures_dir):

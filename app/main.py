@@ -117,9 +117,9 @@ def _err(code: int, why: str) -> dict:
 
 
 _ERRORS = {**_err(400, "zoom/x/y outside the matrix, bad format or size, refused url or "
-                       "scheme, bad bidx/rescale/blackmax, 16-bit data without rescale, "
-                       "unsupported CRS, refused or looping redirect chain"),
-           **_err(404, "COG unreachable, not a GeoTIFF, rotated raster"),
+                       "scheme, bad bidx/rescale/blackmax, signed or wide/float data without "
+                       "rescale, unsupported CRS, refused or looping redirect chain"),
+           **_err(404, "COG unreachable, not a GeoTIFF, rotated raster, unreadable samples"),
            **_err(502, "upstream error")}
 
 
@@ -235,7 +235,7 @@ async def tile(z: int, x: int, y: int,
                quality: int = Query(80, description="jpeg/webp quality, clamped to 1..95"),
                bidx: str | None = Query(None, description="1-based bands to render, e.g. 1,2,3"),
                rescale: str | None = Query(None, description="min,max in source units; required "
-                                                             "for 16-bit data"),
+                                                             "for signed, 32-bit or float data"),
                blackmax: str | None = Query(None, description="pixels whose brightest band is at or "
                                                               "below this become no-coverage; default "
                                                               "20, -1 disables"),

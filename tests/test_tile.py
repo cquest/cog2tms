@@ -6,8 +6,9 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from .conftest import (BBOX4326, COG3857, COG4326, COGBADCRS, COGROT, COGWEBP1,
-                       _web, fixture_tile, tile_url)
+from .conftest import (BBOX4326, COG12, COG3857, COG4326, COGBADCRS, COGCX, COGFP2,
+                       COGNDJUNK, COGNDNEG, COGPRED3, COGROT, COGWEBP1, _web,
+                       fixture_tile, tile_url)
 
 
 def test_healthz(client):
@@ -297,12 +298,24 @@ def test_endpoint_error_paths(client, server):
         (f"{server.base}/junk.txt", 404),                         # not a GeoTIFF
         (f"{server.base}/{COGROT}", 404),                         # rotated raster
         (f"{server.base}/{COGWEBP1}", 404),                       # 1-band WebP level
+        (f"{server.base}/{COG12}", 404),                          # odd BitsPerSample
+        (f"{server.base}/{COGCX}", 404),                          # complex samples
+        (f"{server.base}/{COGPRED3}", 404),                       # float predictor
+        (f"{server.base}/{COGFP2}", 404),                         # differenced floats
+        (f"{server.base}/{COGNDJUNK}", 404),                      # unusable GDAL_NODATA
         (f"{server.base}/{COGBADCRS}", 400),                      # unsupported CRS
     ]
     for path in (f"/c2t/{z}/{x}/{y}.geojson", "/c2t.tms.json"):
         for u, want in cases:
             r = client.get(path, params={"u": u})
             assert r.status_code == want, (path, u, r.status_code)
+
+
+def test_nodata_out_of_range_renders(client, server):
+    """A GDAL_NODATA the sample type cannot hold (-9999 on unsigned 8-bit) must
+    not reach the client as a 500: the value simply matches no pixel."""
+    r = client.get(tile_url(server, COGNDNEG, *fixture_tile()))
+    assert r.status_code == 200 and r.headers["content-type"] == "image/png"
 
 
 def test_allowed_hosts(client, server, monkeypatch):

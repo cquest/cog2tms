@@ -40,13 +40,13 @@ GET, HEAD).
 
 The schema describes the real contract — tile 200 as `image/png|jpeg|webp`, the
 400/404/502 bodies through `_err`/`_ERRORS`, every query parameter documented,
-web UI  — with **no FastAPI validation**
+the web UI hidden with `include_in_schema=False` — with **no FastAPI validation**
 (`Literal`, `ge`/`le`, `pattern`): it would turn the pinned `400`s into `422`s.
 
 Errors: `400` (zoom/x/y outside matrix, format, size, URL/scheme, bidx/rescale/
-blackmax, 16-bit data without `rescale`, unsupported CRS, redirect chain refused
-or looping), `404` (unreachable COG, not a GeoTIFF, rotated raster), `502`
-(upstream error).
+blackmax, signed/wide/float data without `rescale`, unsupported CRS, redirect
+chain refused or looping), `404` (unreachable COG, not a GeoTIFF, rotated
+raster, unreadable samples), `502` (upstream error).
 
 ## Locked decisions
 
@@ -82,7 +82,18 @@ pytest-cov, httpx.
   fetched and stay no-coverage (transparent, not a black smear).
 - GeoTIFF tags: ModelTiepoint/PixelScale (a ModelTransformation — rotated/skewed
   raster — is refused at open), GeoKeyDirectory(+DoubleParams), GDAL_NODATA
-  (nodata only when **every** band matches, GDAL parity), ExtraSamples→alpha.
+  (nodata only when **every** band matches, GDAL parity; compared **without**
+  casting the declared value into the sample type, which numpy 2 refuses:
+  `-9999` on unsigned samples or NaN on integer ones match nothing instead of
+  raising, and a NaN nodata needs `isnan` — `==` never finds it),
+  ExtraSamples→alpha.
+- Sample format (tag 339): unsigned / signed / float, dtype from the
+  **(BitsPerSample, SampleFormat)** pair (`_DT`, 8/16/32/64-bit ints + float32/64).
+  Refused at open: mixed per-band formats, predictor 3 (float byte shuffle),
+  predictor 2 on non-integer samples (cumsum is modular, done in the sample
+  dtype), complex (4) / float16 / bps 12-24 / an unparsable `GDAL_NODATA` — the
+  old `_DT.get(bps, "u1")` fallback read bps 12 as 8-bit and rendered wrong
+  pixels in silence.
 - CRS subset (`app/crs.py`, pure Python): 4326, 3857, 2154 (Lambert-93),
   CC42–CC48 (3942–3948), UTM 326xx/327xx, user-defined LCC/TM from the
   projection keys (3075 = CT 1/8/9/27, both GDAL and ESRI key spellings):
@@ -203,7 +214,8 @@ cog2tms/
 │   ├── test_versions.py   # coherence when the COG is replaced under one URL
 │   ├── test_redirects.py  # own 30x walking + per-hop check_url + target moves
 │   ├── test_codecs.py     # JPEG-in-TIFF fixtures, codec parity, ZSTD, threaded decode
-│   ├── test_pixels.py     # 16-bit rescale, nodata, alpha, internal mask, sliced index,
+│   ├── test_pixels.py     # 16-bit rescale, nodata (+ SampleFormat signed/float, NaN),
+│   │                      # alpha, internal mask, sliced index,
 │   │                      # pixel-center 1:1 warp, sharpen gating
 │   ├── test_format.py     # webp output + format=auto Accept negotiation
 │   └── test_network.py    # integration on remote COGs (`network` marker) + relay proxy proof
@@ -258,8 +270,12 @@ JPEG-in-TIFF, single-band JPEG, LZW (both dialects)/PackBits/ZSTD/predictor-2,
 lossless + lossy **WebP** blocks (RGB, RGBA+alpha, single-band refused),
 16-bit single band, GDAL_NODATA, ExtraSamples alpha, 1-bit internal mask,
 ModelTransformation, unsupported CRS, SubIFD-published overviews (empty chain),
-count-0 merger-hole blocks (bogus past-EOF offsets), a non-TIFF file — served
-by a local Range-capable HTTP server that counts bytes. Pinned behaviors (do not break):
+count-0 merger-hole blocks (bogus past-EOF offsets), **SampleFormat** fixtures
+(int8/int16 with a `-9999` sentinel written over the first column, float32 with
+a NaN sentinel, an out-of-range `GDAL_NODATA`, and the refusals: bps 12, complex
+samples, predictor 3, predictor 2 on floats, `GDAL_NODATA="N/A"`), a non-TIFF
+file — served by a local Range-capable HTTP server that counts bytes. Pinned
+behaviors (do not break):
 
 - center tile PNG; **XYZ convention** (a northern-half red square lands in the
   tile's upper half); **reprojection parity** 4326 vs 3857 (MSE < 100);
@@ -274,9 +290,10 @@ by a local Range-capable HTTP server that counts bytes. Pinned behaviors (do not
   `image/webp;q>0` — the source codec never interferes; cache keyed by the
   resolved format;
 - 400 paths (zoom, x/y, format, scheme, bidx, rescale, blackmax), 404 missing
-  COG / non-TIFF / rotated raster, `size`/`bidx`, TileJSON/GeoJSON/healthz; the
-  same open-error matrix on `.geojson` and `.tms.json`; web UI (`GET /` =
-  map preview page + vendored assets, `/maplibre` redirects to `/`);
+  COG / non-TIFF / rotated raster / unreadable samples, `size`/`bidx`,
+  TileJSON/GeoJSON/healthz; the same open-error matrix on `.geojson` and
+  `.tms.json`; web UI (`GET /` = map preview page + vendored assets, the dropped
+  `/maplibre` route answers 404);
 - **HEAD = GET without the body** on every route (`/healthz`, `robots.txt`,
   `/static/…`, TileJSON, geojson, tiles): 200, an **empty body** (stripped by our
   middleware, since uvicorn's httptools path would not strip it), `content-length`
@@ -288,7 +305,8 @@ by a local Range-capable HTTP server that counts bytes. Pinned behaviors (do not
 - **OpenAPI document is client-generable**: regenerated (`app.openapi_schema =
   None`) with **no** `Duplicate Operation ID` warning, unique `operationId`s, tile
   200 = the three image types, 400/404/502 documented, `tags: ["tiles"]`, all 7
-  query parameters described, `/`, `/docs` and `/redoc` 200;
+  query parameters described, the web UI route absent from the schema while
+  `/`, `/docs` and `/redoc` answer 200;
 - **URL guardrails**: `ALLOWED_HOSTS` enforced on every request — including one
   served from the encoded-tile cache — and re-checked on every redirect hop;
   `check_url` unit cases (scheme, missing host, unresolvable host, private/
@@ -299,7 +317,15 @@ by a local Range-capable HTTP server that counts bytes. Pinned behaviors (do not
   spellings; geokeys dispatch + refusal messages; `unit_scale` table;
 - **pixel semantics**: 16-bit refuses to render without `rescale`, and
   `rescale=0,65535` restores the 8-bit fixture bit-for-bit; `GDAL_NODATA`
-  removes coverage only when every band matches; `ExtraSamples` alpha and the
+  removes coverage only when every band matches, and never raises on a
+  declaration the sample type cannot hold (`-9999` on unsigned 8-bit → the value
+  matches nothing, the tile renders — it used to be a 500); **SampleFormat** 2
+  int16 with the same sentinel goes transparent on the sentinel column only and
+  is bit-exact with the 8-bit fixture under `rescale=0,255`, SampleFormat 3
+  float32 with `GDAL_NODATA="nan"` matches through `isnan`, and int8 samples are
+  caught by the rescale gate (`dtype != uint8`, not `itemsize > 1`); bps 12,
+  complex samples, predictor 3, predictor 2 on floats and an unparsable
+  `GDAL_NODATA` are refused at open; `ExtraSamples` alpha and the
   **1-bit internal mask** (level whose dims match only) drive `valid`; a
   `ModelTransformation` level is refused at open; `TileOffsets` above
   `_SLICE_AT` fetched as per-window slices — pixels identical to whole-load;
@@ -371,7 +397,9 @@ Roadmap 1–4 done (skeleton/PNG/pool; JPEG/bidx/rescale/geojson/TileJSON/
 healthz/CORS; anti-SSRF + fixtures + network tests; Docker + README + public-
 COG verification), plus WebP and `format=auto` on top, then the sharpness fix
 (pixel-center sampling + unsharp) and the transport swap to curl_cffi (HTTP/2
-by ALPN, capped bodies).
+by ALPN, capped bodies), then the sample-format pass: `SampleFormat` read,
+nodata compared without a cast (no more 500 on `-9999`/NaN), signed and float
+pixels rendered behind a mandatory `rescale`.
 
 ## Follow-ups
 
@@ -387,6 +415,16 @@ by ALPN, capped bodies).
   the multi-range GET. Option A (`~/.opencode/plan/cog2tms-http2.md`,
   urllib3[h2]) is superseded: it stalled at 8 concurrent reads and
   `BaseHTTPResponse.stream()` raises `NotImplementedError` under h2.
+- **No-data, the rest** (`~/.opencode/plan/cog2tms-nodata.md`, step 1 done):
+  paletted rasters (`Photometric=3` + `ColorMap` 320 → an RGB LUT at open, which
+  is what makes the palette index of a classified raster drive transparency);
+  a `nodata=v1[,v2…]` override — `gdal -a_nodata` for a file that does not
+  declare it, validated like `rescale` and part of the tile-cache key; an
+  external mask, either GDAL's `<file>.msk` sibling (opt-in flag: a 404 is the
+  normal answer for files without one) or a `mask=<url>` second COG (own
+  georeferencing to check, one more reader in the pool). Which of these the
+  NHK/GeoYell Japanese COGs need is unproven — their host is NXDOMAIN and the
+  mirror refuses the TLS server name — a `gdalinfo -stats` settles it.
 - **On hold (probed + planned**, `~/.opencode/plan/cog2tms-passthrough.md`):
   byte-passthrough of JPEG-in-TIFF blocks (tier B rewrap, tier A raw copy) and
   `quality=src` via DQT estimation. Rejected for `auto`: webp is smaller than a

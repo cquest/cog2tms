@@ -155,22 +155,40 @@ def pattern4(half=False):
     return np.dstack([a, al])
 
 
+# declared (BitsPerSample, SampleFormat) -> numpy dtype of the pixel payload
+_DTS = {(8, 1): np.uint8, (16, 1): np.uint16, (32, 1): np.uint32, (64, 1): np.uint64,
+        (8, 2): np.int8, (16, 2): np.int16, (32, 2): np.int32, (64, 2): np.int64,
+        (16, 3): np.float16, (32, 3): np.float32, (64, 3): np.float64}
+
+
 def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
               nodata=None, geokeys=None, lzw_ours=True, predictor=1, mask=False,
-              rotated=False, subifd=False, holes=False, webp_lossless=True):
+              rotated=False, subifd=False, holes=False, webp_lossless=True,
+              fmt=None, sentinel=None):
     """Classic tiled little-endian TIFF: level 0 + a 2x internal overview, plus
     optional extras - a 1-bit internal coverage mask (NewSubfileType & 4), a
     horizontal-differencing predictor, GDAL_NODATA, ExtraSamples=ALPHA, a
     ModelTransformation (rotated raster, which the reader must refuse),
     overviews as SubIFDs (tag 330) instead of the linked IFD chain,
-    count-0 blocks (cog_merger holes: absent data in a merged footprint), or
-    WebP blocks (compression 50001, lossless unless webp_lossless=False).
+    count-0 blocks (cog_merger holes: absent data in a merged footprint),
+    WebP blocks (compression 50001, lossless unless webp_lossless=False), a
+    declared SampleFormat (tag 339: 1 unsigned, 2 signed, 3 float, 4 complex for
+    a file that must be refused) with the pattern widened to that depth, or a
+    nodata sentinel written over the first column (-9999, NaN: values a reader
+    must never turn into a pixel).
     Layout: header | tiles of each IFD | value areas | IFDs."""
     src = pattern() if samples == 3 else pattern4() if samples == 4 else pattern()[..., 0]
     src_h = (pattern(half=True) if samples == 3 else pattern4(half=True)
              if samples == 4 else pattern(half=True)[..., 0])
-    if bps == 16:
-        src, src_h = src.astype(np.uint16) * 257, src_h.astype(np.uint16) * 257
+    # an undeclared depth (12-bit...) is still written as a byte payload: the
+    # point of that fixture is that the reader refuses it, not what it holds
+    dt = _DTS.get((bps, fmt or 1), np.uint16)
+    mul = 257 if (bps, fmt or 1) == (16, 1) else 1  # the 16-bit fixture keeps the pattern
+    if dt is not np.uint8:
+        src, src_h = src.astype(dt) * mul, src_h.astype(dt) * mul
+    if sentinel is not None:  # pattern() is lru_cached: copy before marking it out
+        src, src_h = src.copy(), src_h.copy()
+        src[:, 0] = src_h[:, 0] = sentinel
     phot = 6 if (comp == 7 and samples == 3) else (1 if samples == 1 else 2)
     lvls = [dict(arr=a, sub=sub, samples=samples, bps=bps, comp=comp, phot=phot, geo=True)
             for a, sub in ((src, 0), (src_h, 1))]
@@ -180,7 +198,9 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
         lvls.append(dict(arr=bits, sub=4, samples=1, bps=1, comp=8, phot=1, geo=False))
     for l in lvls:  # a lone SHORT fits inline in the IFD; 1-bit masks never difference
         l["bps_len"] = 2 * l["samples"] if l["samples"] > 1 else 0
-        l["pred"] = predictor if l["bps"] in (8, 16) else 1
+        l["fmt"] = 0 if l["bps"] == 1 else (fmt or 1)  # 0 = tag 339 absent (unsigned)
+        l["fmt_len"] = 2 * l["samples"] if l["fmt"] and l["samples"] > 1 else 0
+        l["pred"] = predictor if l["bps"] in (8, 16) or l["fmt"] else 1
     blobs = [_tiles(l["arr"], l["comp"], lzw_ours, l["pred"], l["bps"], webp_lossless)
              for l in lvls]
 
@@ -210,6 +230,9 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
         ]
         if l["samples"] == 4:  # ExtraSamples=ALPHA: the reader turns band 4 into a mask
             ent.append((338, 3, 1, struct.pack("<H", 2)[:4]))
+        if l["fmt"]:  # SampleFormat: 1 unsigned / 2 signed / 3 float / 4 complex
+            ent.append((339, 3, l["samples"],
+                        None if l["fmt_len"] else struct.pack("<H", l["fmt"])[:4]))
         ent += [(284, 3, 1, struct.pack("<H", 1)[:4]),  # planar contig
                 (317, 3, 1, struct.pack("<H", l["pred"])[:4]),
                 (322, 3, 1, struct.pack("<H", TILE)[:4]),
@@ -228,9 +251,10 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
             ent.append((330, 4, no, b"PTRO" if no == 1 else None))
             if no > 1:
                 areas.append((330, 4 * no))
-        # area layout: bps (0 if inline) | offs | cnts | then for geo IFDs:
-        # scale | tiepoint | geokeys | transformation | nodata | then subifds
-        areas = [(258, l["bps_len"]), (324, 4 * nt), (325, 4 * nt)]
+        # area layout: bps (0 if inline) | fmt (0 if inline/absent) | offs | cnts |
+        # then for geo IFDs: scale | tiepoint | geokeys | transformation | nodata |
+        # then subifds
+        areas = [(258, l["bps_len"]), (339, l["fmt_len"]), (324, 4 * nt), (325, 4 * nt)]
         if l["geo"]:
             areas += [(33550, 24), (33922, 48), (34735, 2 * len(geokeys))]
             if rotated:
@@ -250,6 +274,8 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
         a = bytearray()
         a.extend(struct.pack("<" + "H" * l["samples"], *([l["bps"]] * l["samples"]))
                  if l["bps_len"] else b"")
+        a.extend(struct.pack("<" + "H" * l["samples"], *([l["fmt"]] * l["samples"]))
+                 if l["fmt_len"] else b"")
         a.extend(struct.pack("<" + "I" * nt, *([0] * nt)))   # TileOffsets (patched)
         a.extend(struct.pack("<" + "I" * nt, *cnts))
         if l["geo"]:
@@ -296,7 +322,7 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
     cur = tile_off
     for i, lv in enumerate(blobs):
         ab = bytearray(area_blobs[i])
-        base = lvls[i]["bps_len"]
+        base = lvls[i]["bps_len"] + lvls[i]["fmt_len"]
         cols = lvls[i]["arr"].shape[1] // TILE
         for j, b in enumerate(lv):
             bad = holes and i < 2 and j % cols == cols - 1
@@ -439,6 +465,27 @@ def fixtures_dir(tmp_path_factory):
               geographic=True, subifd=True)  # overviews as SubIFDs (tag 330)
     write_cog(d / "coghole.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
               geographic=True, holes=True)  # cog_merger count-0 hole blocks
+    write_cog(d / "cogndneg.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, fmt=1, nodata="-9999")  # sentinel off the sample range
+    write_cog(d / "cogi8.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, samples=1, bps=8, fmt=2)  # signed bytes
+    write_cog(d / "cogi16.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, samples=1, bps=16, fmt=2,
+              sentinel=-9999, nodata="-9999")  # DEM: -9999 over the first column
+    write_cog(d / "cogf32.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, samples=1, bps=32, fmt=3,
+              sentinel=np.nan, nodata="nan")  # float32 with NaN no-data
+    write_cog(d / "cog12.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, samples=1, bps=12)  # odd depth: refused, not guessed
+    write_cog(d / "cogcx.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, samples=1, bps=32, fmt=4)  # complex samples: refused
+    write_cog(d / "cogpred3.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, predictor=3)  # predictor 3 (IEEE float shuffle)
+    write_cog(d / "cogfp2.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, samples=1, bps=32, fmt=3,
+              predictor=2)  # differencing declared on float samples
+    write_cog(d / "cogndjunk.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, nodata="N/A")  # GDAL_NODATA that is not a number
     (d / "junk.txt").write_text("this is not a GeoTIFF\n")
     return d
 
@@ -492,6 +539,15 @@ COGWEBP1 = "cogwebp1.tif"  # single-band WebP: refused at open (not RGB/RGBA)
 COGSUB = "cogsub.tif"  # overviews via SubIFDs (tag 330), empty IFD chain
 COGHOLE = "coghole.tif"  # east block column: count 0 = no-data merger holes
 COGBADCRS = "cogbadcrs.tif"  # geographic EPSG:42304 -> refused
+COGNDNEG = "cogndneg.tif"  # GDAL_NODATA=-9999 on unsigned 8-bit: matches nothing
+COGI8 = "cogi8.tif"  # SampleFormat 2 with bps 8: signed bytes
+COGI16 = "cogi16.tif"  # int16 DEM: -9999 sentinel column + GDAL_NODATA=-9999
+COGF32 = "cogf32.tif"  # float32 samples, NaN no-data (GDAL_NODATA="nan")
+COG12 = "cog12.tif"  # 12-bit samples: refused, never silently read as 8-bit
+COGCX = "cogcx.tif"  # SampleFormat 4 (complex): refused
+COGPRED3 = "cogpred3.tif"  # predictor 3 (IEEE float shuffle): refused
+COGFP2 = "cogfp2.tif"  # predictor 2 declared on float samples: refused
+COGNDJUNK = "cogndjunk.tif"  # GDAL_NODATA="N/A": refused, not turned into 0.0
 
 TILE_ZOOM = 14  # one tile covers the whole 4 km fixture footprint
 

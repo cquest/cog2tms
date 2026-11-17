@@ -2,7 +2,9 @@
 
 Only the tags needed to read pixel windows by byte-range are parsed. Supported:
 little/big endian classic TIFF and BigTIFF, tiled layout, planar contig, no
-rotation; compressions None/Deflate/LZW/PackBits/ZSTD/JPEG/WebP (JPEG-in-TIFF
+rotation; unsigned/signed/float samples (SampleFormat) with GDAL_NODATA or an
+internal 1-bit mask driving transparency; compressions
+None/Deflate/LZW/PackBits/ZSTD/JPEG/WebP (JPEG-in-TIFF
 blocks are spliced with JPEGTables then decoded by simplejpeg, Pillow as
 fallback; WebP-in-TIFF blocks are whole RIFF/WEBP images decoded by
 imagecodecs, Pillow as fallback; LZW, PackBits and ZSTD use imagecodecs,
@@ -42,13 +44,21 @@ _TYPES = {1: ("B", 1), 2: ("c", 1), 3: ("H", 2), 4: ("I", 4), 5: ("II", 8),
 
 _NEW_SUBFILE, _W, _H, _BPS, _COMP, _PHOTOM = 254, 256, 257, 258, 259, 262
 _SAMPLES, _EXTRA, _PLANAR = 277, 338, 284
+_SAMPLEFMT = 339  # 1 unsigned / 2 signed / 3 IEEE float, per band
 _TILEW, _TILEH, _TILOFFS, _TILCNTS, _PREDICTOR = 322, 323, 324, 325, 317
 _TIEPOINT, _SCALE, _MODELTRANSF = 33922, 33550, 34264
 _SUBIFDS = 330  # alternate overview layout: IFD offsets here, chain not used
 _WEBP = 50001  # libtiff's WebP codec id: each block is a whole RIFF/WEBP image
 _GEOKEYS, _GEODOUBLE, _JPEGTABLES, _GDAL_NODATA = 34735, 34736, 347, 42113
 
-_DT = {8: "u1", 16: "u2", 32: "u4"}
+# (BitsPerSample, SampleFormat) -> numpy dtype code: signed and float rasters
+# (DEMs, model grids) are real COGs, and guessing 8-bit for bps 12 would render
+# wrong pixels instead of refusing. Refused: SampleFormat 4 (complex), 5 (B int)
+# and 6 (IEEE big float), odd bit depths (12, 24) and float16 (libtiff writes
+# float32 at least).
+_DT = {(1, 1): "u1", (8, 1): "u1", (16, 1): "u2", (32, 1): "u4", (64, 1): "Q",
+       (8, 2): "i1", (16, 2): "i2", (32, 2): "i4", (64, 2): "q",
+       (32, 3): "f4", (64, 3): "f8"}
 
 # TileOffsets/TileByteCounts bigger than this are fetched per window (a few
 # hundred bytes) instead of whole: L0 of a big COG indexes millions of blocks
@@ -87,11 +97,39 @@ def _scalar(end, tags, code):
     return struct.unpack(end + _TYPES[t][0], v[: _TYPES[t][1]])[0]
 
 
+def _shorts(end, tags, code) -> tuple:
+    if code not in tags:
+        return ()
+    _, c, v = tags[code]
+    return struct.unpack(end + "H" * c, v[: 2 * c]) if len(v) >= 2 * c else ()
+
+
 def _doubles(end, tags, code):
     if code not in tags:
         return ()
     _, c, v = tags[code]
     return struct.unpack(end + "d" * c, v[: 8 * c]) if len(v) >= 8 * c else ()
+
+
+def _nodata_match(out: np.ndarray, vals: list) -> np.ndarray:
+    """Pixels equal to the declared nodata on **every** band (GDAL semantics:
+    np.any would also drop pixels that merely share one channel value with it).
+    Compared without casting the declared values into the sample type, which
+    numpy 2 refuses: -9999 on unsigned samples or NaN on integer ones cannot be
+    a pixel, they simply match nothing (GDAL compares doubles too). NaN needs
+    isnan - NaN != NaN. Fewer values than bands constrains only those bands."""
+    m = np.ones(out.shape[:2], bool)
+    for i, v in enumerate(vals[: out.shape[2]]):
+        col = out[..., i]
+        if np.isnan(v):
+            ok = np.isnan(col) if out.dtype.kind == "f" else False
+        elif out.dtype.kind in "iu":
+            r = np.iinfo(out.dtype)
+            ok = col == int(v) if r.min <= v <= r.max and int(v) == v else False
+        else:
+            ok = col == v
+        m &= ok
+    return m
 
 
 def _lzw_decode(raw: bytes) -> bytes:
@@ -174,6 +212,10 @@ class _Level:
         self.planar = _scalar(end, tags, _PLANAR) or 1
         self.predictor = _scalar(end, tags, _PREDICTOR) or 1
         self.bps = _scalar(end, tags, _BPS) or 8
+        fmts = _shorts(end, tags, _SAMPLEFMT)
+        if fmts and len(set(fmts)) > 1:
+            raise CogError("per-band SampleFormat not supported")
+        self.fmt = fmts[0] if fmts else 1
         self.tilew = _scalar(end, tags, _TILEW)
         self.tileh = _scalar(end, tags, _TILEH)
         self.jpegtables = tags.get(_JPEGTABLES, (0, 0, b""))[2] or None
@@ -181,7 +223,17 @@ class _Level:
             raise CogError("not a tiled GeoTIFF")
         if self.planar != 1:
             raise CogError("planarconfig separate not supported")
-        if self.compression == _WEBP and (self.bps != 8 or self.samples not in (3, 4)
+        if (self.bps, self.fmt) not in _DT:
+            # the old fallback read bps 12 (or a complex sample) as 8-bit and
+            # rendered wrong pixels in silence: refuse what we cannot decode
+            raise CogError(f"unsupported BitsPerSample {self.bps} / SampleFormat {self.fmt}")
+        if self.predictor == 3:  # TIFF 6 byte shuffle for float samples
+            raise CogError("predictor 3 (float byte shuffle) not supported")
+        if (self.predictor == 2 and self.compression != 1
+                and not (self.bps in (8, 16, 32, 64) and self.fmt in (1, 2))):
+            raise CogError("predictor 2 needs 8/16/32/64-bit integer samples")
+        if self.compression == _WEBP and (self.bps != 8 or self.fmt != 1
+                                          or self.samples not in (3, 4)
                                           or self.photometric != 2):
             # libwebp only decodes whole 8-bit RGB/RGBA images (what GDAL writes)
             raise CogError("WebP blocks must be 8-bit RGB/RGBA")
@@ -192,7 +244,7 @@ class _Level:
         self.offsets = self.counts = None  # loaded only if this level is read
         self.cols = (self.width + self.tilew - 1) // self.tilew
         self.rows = (self.height + self.tileh - 1) // self.tileh
-        self.dtype = end + _DT.get(self.bps, "u1")
+        self.dtype = end + _DT[(self.bps, self.fmt)]
 
     def index(self, idx0: int, idx1: int):
         """Block index entries [idx0..idx1] (row-major block range): returns
@@ -332,7 +384,10 @@ class CogFile:
         self.ox = tie[3] - tie[0] * self.psx
         self.oy = tie[4] + tie[1] * self.psy
         v = tags.get(_GDAL_NODATA, (0, 0, b""))[2].decode(errors="ignore").strip()
-        self.nodata = [float(p) for p in v.split(",")] if v else None
+        try:  # "nan" is a legitimate GDAL sentinel; garbage must not reach numpy
+            self.nodata = [float(p) for p in v.split(",")] if v else None
+        except ValueError:
+            raise CogError(f"bad GDAL_NODATA {v!r}") from None
         self.extra_alpha = _scalar(self.end, tags, _EXTRA) is not None
         keys = self._geokeys(tags)
         self.crs = crs.crs_from_geokeys(keys)
@@ -412,12 +467,8 @@ class CogFile:
         if self.extra_alpha and s >= 4:
             valid &= out[..., 3] > 0
             out = out[..., :3]
-            s = 3
         if self.nodata is not None:
-            nd = np.array(self.nodata[: s], dtype=out.dtype)
-            # GDAL semantics: nodata only when every band matches (np.any would
-            # also drop pixels that share one channel value with nodata)
-            valid &= ~np.all(out == nd, axis=-1)
+            valid &= ~_nodata_match(out, self.nodata)
         return out, valid
 
     def _window(self, lvl: _Level, ns: int, c0: int, r0: int, c1: int, r1: int):
@@ -505,13 +556,8 @@ class CogFile:
         if a.size != th * tw * s:
             raise CogError("truncated block")
         a = a.reshape((th, tw, s))
-        if lvl.predictor == 2 and comp != 1 and lvl.bps in (8, 16):
-            if lvl.bps == 8:
-                a = np.cumsum(a, axis=1, dtype=np.uint8)
-            elif lvl.bps == 16:
-                a = np.cumsum(a, axis=1, dtype=np.uint16)
-            else:
-                raise CogError("unsupported predictor/bit depth")
+        if lvl.predictor == 2 and comp != 1:  # mod 2**bps, so cumsum in the sample type
+            a = np.cumsum(a, axis=1, dtype=lvl.dtype)
         return a
 
     @staticmethod

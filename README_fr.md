@@ -34,9 +34,11 @@ GET /openapi.json   GET /docs   GET /redoc       # schéma OpenAPI 3.1 + docs (s
   transparents, JPEG en remplissage `EMPTY_TILE_BG`.
 - `blackmax=0..255` : les pixels quasi noirs (lisiérés d'orthophotos sans
   masque) passent en non-couverture ; défaut `20`, `-1` désactive.
-- Erreurs : `400` zoom / indice / format / taille / URL, données 16 bits sans
-  `rescale`, SIG non pris en charge, chaîne de redirections refusée ; `404`
-  COG injoignable ou pas un GeoTIFF ; `502` erreur en amont.
+- transparence sur NODATA
+- Erreurs : `400` zoom / indice / format / taille / URL, données signées, 32
+  bits ou flottantes sans `rescale`, SIG non pris en charge, chaîne de
+  redirections refusée ; `404` COG injoignable, pas un GeoTIFF ou format
+  d'échantillons inutilisable ; `502` erreur en amont.
 
 ## Lancer en local
 

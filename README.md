@@ -33,9 +33,10 @@ GET /openapi.json   GET /docs   GET /redoc       # OpenAPI 3.1 + docs (swagger-u
   solid `EMPTY_TILE_BG` for JPEG.
 - `blackmax=0..255`: near-black pixels (unmasked orthophoto fringes) become
   no-coverage; default `20`, `-1` disables.
-- Errors: `400` zoom / index / format / size / URL, 16-bit data without
-  `rescale`, unsupported CRS, refused redirect chain; `404` COG unreachable or
-  not a GeoTIFF; `502` upstream error.
+- NODATA becomes transparency
+- Errors: `400` zoom / index / format / size / URL, signed/32-bit/float data
+  without `rescale`, unsupported CRS, refused redirect chain; `404` COG
+  unreachable, not a GeoTIFF, unusable sample format; `502` upstream error.
 
 ## Run locally
 

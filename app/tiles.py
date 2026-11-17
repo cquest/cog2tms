@@ -95,9 +95,9 @@ def render_tile(cog, z: int, x: int, y: int, size: int,
     data, valid = cog.window(level, wc0, wr0, wc1, wr1)
     if bidx:
         data = data[..., [i - 1 for i in bidx]]
-    if rescale or data.dtype.itemsize > 1:
+    if rescale or data.dtype != np.uint8:
         if not rescale:
-            raise MissingRescale("16/32-bit data requires rescale=min,max")
+            raise MissingRescale("signed/32-bit/float data requires rescale=min,max")
         lo, hi = rescale
         data = np.clip((data.astype(np.float32) - lo) * 255.0 / max(hi - lo, 1e-9), 0, 255)
         data = data.astype(np.uint8)
