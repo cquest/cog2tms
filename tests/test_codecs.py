@@ -8,9 +8,11 @@ import pytest
 from app import geotiff as g
 from app import tiles
 from app.httprange import LocalReader
-from .conftest import (COG4326, COGALPHA, COGLZW, COGLZWLIB, COGJPEG, COGJPEG1,
+from .conftest import (COG4326, COGALPHA, COGJPT, COGJPT1, COGJPTBAD, COGJPTD9,
+                       COGJPTNE, COGJPTSELF, COGLZW, COGLZWLIB, COGJPEG, COGJPEG1,
                        COGPACK, COGPRED, COGWEBP, COGWEBPA, COGWEBPL, COGZSTD,
-                       fixture_tile)
+                       TBL_JPEGTM, TILE, _block, _jpeg_tables, fixture_tile,
+                       pattern, tile_url)
 
 POOL = g._POOL  # the pool as configured, to put it back inside tests
 
@@ -53,6 +55,65 @@ def test_gray_jpeg_fixture(fixtures_dir):
     assert (rgb[..., 0] == rgb[..., 1]).all() and (rgb[..., 1] == rgb[..., 2]).all()
     # the fixture's red channel is its gray pattern (measured max diff: 1)
     assert np.abs(rgb[..., 0].astype(int) - ref[..., 0].astype(int)).max() < 16
+
+
+def test_jpegtables_splice_matches_self_contained(fixtures_dir):
+    """GDAL/libtiff's layout: the DQT segments live once in the IFD (tag 347) and
+    the blocks no longer carry them. Splicing must give the very same pixels as
+    the self-contained blocks of that content - bit for bit, not "close"."""
+    ref = _rgb_valid(*_render(fixtures_dir, COGJPEG))
+    assert (_rgb_valid(*_render(fixtures_dir, COGJPT)) == ref).all()
+
+
+def test_jpegtables_terminators(fixtures_dir):
+    """Tag 347 ends with libtiff's JPEGTM EOI (FF 7F), the JPEG EOI (FF D9), or
+    nothing at all: the terminator is dropped when present, and without one the
+    blob is spliced as is."""
+    ref = _rgb_valid(*_render(fixtures_dir, COGJPT))  # FF 7F
+    for name in (COGJPTD9, COGJPTNE):
+        assert (_rgb_valid(*_render(fixtures_dir, name)) == ref).all(), name
+
+
+def test_jpegtables_blocks_with_their_own_dqt(fixtures_dir):
+    """Tag 347 declared *and* blocks keeping their DQT: splicing unconditionally
+    is correct without detecting the flavor, because a later DQT for the same Tq
+    replaces the earlier one."""
+    ref = _rgb_valid(*_render(fixtures_dir, COGJPT))
+    assert (_rgb_valid(*_render(fixtures_dir, COGJPTSELF)) == ref).all()
+
+
+def test_gray_jpegtables(fixtures_dir):
+    """Single-band JPEG + tag 347: one DQT in the blob (73 bytes, not 142), and
+    the GRAY decoding path is unaffected by the splice."""
+    ref = _rgb_valid(*_render(fixtures_dir, COGJPEG1))
+    assert (_rgb_valid(*_render(fixtures_dir, COGJPT1)) == ref).all()
+
+
+def test_jpegtables_unusable_blob_refused(fixtures_dir, client, server):
+    """Tag 347 without SOI: the spliced stream is not a JPEG at all. The answer
+    is 404 (unreadable samples) - never invented pixels - while the file itself
+    still opens, so its footprint and TileJSON stay readable."""
+    with pytest.raises(g.CogError, match="cannot decode JPEG block"):
+        _render(fixtures_dir, COGJPTBAD)
+    z, x, y = fixture_tile()
+    u = f"{server.base}/{COGJPTBAD}"
+    assert client.get(tile_url(server, COGJPTBAD, z, x, y)).status_code == 404
+    for path in (f"/c2t/{z}/{x}/{y}.geojson", "/c2t.tms.json"):
+        assert client.get(path, params={"u": u}).status_code == 200, path
+
+
+def test_bare_jpeg_block_needs_the_tables():
+    """The splice recipe of _decode_jpeg, pinned without a file: a block whose
+    DQT moved to tag 347 is not decodable alone (libjpeg cannot even read its
+    subsampling), and tables + block minus SOI is what makes it a JPEG."""
+    blocks, tab = _jpeg_tables([_block(pattern()[:TILE, :TILE], 7, True, 1, 8)],
+                               TBL_JPEGTM)
+    body = blocks[0]
+    assert (body[:2], tab[:2], tab[-2:]) == (b"\xff\xd8", b"\xff\xd8", b"\xff\x7f")
+    assert b"\xff\xdb" not in body and b"\xff\xda" in body  # DQT out, SOS kept
+    with pytest.raises(g.CogError, match="cannot decode JPEG block"):
+        g.CogFile._decode_jpeg(body, None, 3)
+    assert g.CogFile._decode_jpeg(body, tab, 3).shape == (TILE, TILE, 3)
 
 
 @pytest.mark.skipif(g._sjpeg is None, reason="simplejpeg is not installed")

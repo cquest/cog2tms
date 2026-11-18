@@ -70,8 +70,10 @@ pytest-cov, httpx.
   full tile at edges like JPEG; 8-bit RGB/RGBA only (else refused at open),
   straight (never premultiplied) alpha, decoded by imagecodecs/libwebp with a
   Pillow fallback — pixels identical to GDAL/libwebp,
-  **old-style JPEG**: blocks lack DQT/DHT → splice IFD `JPEGTables` (minus
-  trailing EOI) + block body (GDAL recipe), then simplejpeg (`colorspace="RGB"`,
+  **old-style JPEG**: blocks may lack their tables — GDAL moves the DQT to the IFD
+  `JPEGTables` tag 347 (`SOI` + DQT + `FF7F`/`FFD9`/nothing; the DHT stay per
+  block, they differ block by block) → splice tag (minus trailing EOI) + block
+  body, then simplejpeg (`colorspace="RGB"`,
   `"GRAY"` for 1-sample levels; Pillow fallback). LZW/PackBits go through
   **imagecodecs** when installed (it also reads the libtiff LZW variant our
   pure-Python decoder rejects); ZSTD requires imagecodecs — blocks are one plain
@@ -266,7 +268,9 @@ blackmax, opaque black with `blackmax=-1`).
 
 Fixtures written **in pure Python by conftest** (tiled TIFF + internal 2×
 overview + GeoTIFF tags): EPSG:4326 and EPSG:3857 COGs with identical content,
-JPEG-in-TIFF, single-band JPEG, LZW (both dialects)/PackBits/ZSTD/predictor-2,
+JPEG-in-TIFF — also stored the GDAL way, DQT moved to the IFD `JPEGTables` tag
+347 (blob ending `FF7F`/`FFD9`/nothing, blocks keeping their own DQT, and a blob
+without SOI) — single-band JPEG, LZW (both dialects)/PackBits/ZSTD/predictor-2,
 lossless + lossy **WebP** blocks (RGB, RGBA+alpha, single-band refused),
 16-bit single band, GDAL_NODATA, ExtraSamples alpha, 1-bit internal mask,
 ModelTransformation, unsupported CRS, SubIFD-published overviews (empty chain),
@@ -340,11 +344,18 @@ behaviors (do not break):
   (no halo on the footprint edge), and level-0 tiles are byte-identical
   whatever `SHARPEN` is set to;
 - **byte-range proof**: served bytes ≪ file size, every upstream request has
-  `Range:`; multi-range fallback learned per host; a range request answered 200
+  `Range:` (the Range rule on the deflate and the tag-347 JPEG fixtures, the
+  byte count only on the 200 KB one — the JPEG fixtures are smaller than the
+  64 KB head prefetch, where one honest range *is* the whole file);
+  multi-range fallback learned per host; a range request answered 200
   (whole file) is cut off at once — the reader fails fast and only a few KB of
   that body ever arrive, and no `Accept-Encoding` is advertised (a transparently
   inflated body would break our Content-Range bookkeeping);
 - **codecs**: JPEG-in-TIFF renders like the deflate fixture and stays north-up;
+  the **tag 347 splice** is bit-identical to the self-contained blocks (blob
+  ending `FF7F`/`FFD9`/nothing, blocks that keep their own DQT, single-band
+  GRAY), a stripped block alone never decodes and a `JPEGTables` without SOI is
+  a `CogError` → **404**, not invented pixels;
   simplejpeg vs Pillow parity (≤ 2 levels); imagecodecs LZW/PackBits blocks
   byte-exact, including the **libtiff LZW variant** (our pure-Python decoder
   rejects it — pinned); predictor 2 bit-identical to plain deflate; **ZSTD**
@@ -399,7 +410,9 @@ COG verification), plus WebP and `format=auto` on top, then the sharpness fix
 (pixel-center sampling + unsharp) and the transport swap to curl_cffi (HTTP/2
 by ALPN, capped bodies), then the sample-format pass: `SampleFormat` read,
 nodata compared without a cast (no more 500 on `-9999`/NaN), signed and float
-pixels rendered behind a mandatory `rescale`.
+pixels rendered behind a mandatory `rescale`, then the GDAL JPEG layout (IFD tag
+347) covered by offline fixtures — its splice pinned bit-identical to
+self-contained blocks, and an undecodable block is a 404 instead of a 500.
 
 ## Follow-ups
 

@@ -8,10 +8,16 @@ import time
 import pytest
 
 from app.httprange import CogFetch, RangeReader
-from .conftest import COG4326, fixture_tile, tile_url
+from .conftest import COG4326, COGJPT, fixture_tile, tile_url
+
+FIXTURES = (COG4326, COGJPT)  # plain deflate, and JPEG whose DQT sits in tag 347
 
 
 def test_render_reads_only_needed_bytes(client, server, counter, fixtures_dir):
+    """The COG is 200 KB and the render reads a few blocks. (Not pinned on the
+    JPEG fixtures: they are ~27 KB, below the 64 KB head prefetch, so a single
+    honest range there is the whole file - test_all_upstream_requests_use_range
+    covers them instead.)"""
     file_size = (fixtures_dir / COG4326).stat().st_size
     z, x, y = fixture_tile()
     r = client.get(tile_url(server, COG4326, z, x, y))
@@ -23,9 +29,10 @@ def test_render_reads_only_needed_bytes(client, server, counter, fixtures_dir):
     assert served < file_size * 0.5
 
 
-def test_all_upstream_requests_use_range(client, server, counter):
+@pytest.mark.parametrize("name", FIXTURES)
+def test_all_upstream_requests_use_range(client, server, counter, name):
     z, x, y = fixture_tile()
-    client.get(tile_url(server, COG4326, z, x, y, format="jpeg"))
+    client.get(tile_url(server, name, z, x, y, format="jpeg"))
     assert counter.requests, "server saw no request"
     bad = [(p, r) for p, r in counter.requests if not (r and r.startswith("bytes="))]
     assert not bad, f"requests without Range: {bad}"

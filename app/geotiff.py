@@ -606,8 +606,11 @@ class CogFile:
                 return _sjpeg(raw, colorspace=mode)
             except Exception:
                 pass  # Pillow is more permissive on odd streams
-        im = Image.open(BytesIO(raw))
-        im.load()
+        try:  # not a JPEG stream (a bad tag 347 splice): refuse, don't invent pixels
+            im = Image.open(BytesIO(raw))
+            im.load()
+        except Exception:
+            raise CogError("cannot decode JPEG block") from None
         a = np.asarray(im.convert("L" if samples == 1 else "RGB"))
         return a[..., None] if a.ndim == 2 else a
 

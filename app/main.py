@@ -328,6 +328,8 @@ async def _render(u: str, z: int, x: int, y: int, format: str, quality: int,
         raise HTTPException(502, "COG vanished")
     except CogFetch as e:
         raise HTTPException(502, f"upstream error: {e}")
+    except CogError as e:  # the file opened, its pixels did not: refuse with 404
+        raise HTTPException(404, f"unreadable COG: {e}")
     return _encode(rgb, valid, format, quality)
 
 

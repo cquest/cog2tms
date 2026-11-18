@@ -22,6 +22,9 @@ os.environ["ALLOW_PRIVATE_NET"] = "1"  # fixture server is on loopback
 
 W = H = 512
 TILE = 128
+# what a tag 347 (JPEGTables) blob ends with: libtiff writes the JPEGTM EOI
+# (FF 7F), other writers the JPEG one (FF D9), a few nothing at all
+TBL_JPEGTM, TBL_EOI, TBL_NONE = b"\xff\x7f", b"\xff\xd9", b""
 
 # fixture footprint (near Paris) in lon/lat and its EPSG:3857 box
 BBOX4326 = (2.30, 48.83, 2.36, 48.88)  # w,s,e,n
@@ -81,6 +84,27 @@ def _tiles(arr, comp=8, lzw_ours=True, predictor=1, bps=8, webp_lossless=True):
     return [_block(arr[tj * th:(tj + 1) * th, ti * tw:(ti + 1) * tw],
                    comp, lzw_ours, predictor, bps, webp_lossless)
             for tj in range(h // th) for ti in range(w // tw)]
+
+
+def _jpeg_tables(blocks, eoi, keep=False, bad=False):
+    """Rewrite self-contained JPEG blocks the way GDAL/libtiff store them in a COG:
+    the DQT segments move to the IFD as tag 347 (`SOI` + DQT + terminator) while
+    each block keeps SOI + SOF + DHT + SOS + scan data - the DHT stay per block,
+    as they do in the reference COGs. The walk stops at SOS: scan data may hold
+    0xFF bytes. Returns (blocks, tables); `keep` leaves the blocks alone (tag 347
+    declared *and* blocks carry their own DQT - a later DQT wins, so the splice
+    is still right), `bad` omits the SOI, making the spliced stream no JPEG."""
+    out, tab = [], None
+    for b in blocks:
+        head, dqt, i = bytearray(), bytearray(), 2
+        while i < len(b) - 1 and b[i] == 0xFF and b[i + 1] not in (0xD9, 0xDA):
+            ln = int.from_bytes(b[i + 2:i + 4], "big")
+            (dqt if b[i + 1] == 0xDB else head).extend(b[i:i + 2 + ln])  # 0xDB = DQT
+            i += 2 + ln
+        if dqt and tab is None:  # one blob per IFD: every block shares these tables
+            tab = (b"" if bad else b[:2]) + bytes(dqt) + eoi
+        out.append(b if keep or not dqt else b[:2] + bytes(head) + b[i:])
+    return out, tab
 
 
 def _lzw_encode(data: bytes) -> bytes:
@@ -164,7 +188,8 @@ _DTS = {(8, 1): np.uint8, (16, 1): np.uint16, (32, 1): np.uint32, (64, 1): np.ui
 def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
               nodata=None, geokeys=None, lzw_ours=True, predictor=1, mask=False,
               rotated=False, subifd=False, holes=False, webp_lossless=True,
-              fmt=None, sentinel=None):
+              fmt=None, sentinel=None, jpegtables=None, keep_tables=False,
+              bad_tables=False):
     """Classic tiled little-endian TIFF: level 0 + a 2x internal overview, plus
     optional extras - a 1-bit internal coverage mask (NewSubfileType & 4), a
     horizontal-differencing predictor, GDAL_NODATA, ExtraSamples=ALPHA, a
@@ -175,7 +200,10 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
     declared SampleFormat (tag 339: 1 unsigned, 2 signed, 3 float, 4 complex for
     a file that must be refused) with the pattern widened to that depth, or a
     nodata sentinel written over the first column (-9999, NaN: values a reader
-    must never turn into a pixel).
+    must never turn into a pixel), or JPEG blocks stored the GDAL/libtiff way -
+    `jpegtables=<terminator>` moves their DQT segments to the IFD JPEGTables tag
+    (347) and strips them from the blocks, `keep_tables` declares the tag while
+    the blocks keep their own DQT, `bad_tables` writes a tag 347 without SOI.
     Layout: header | tiles of each IFD | value areas | IFDs."""
     src = pattern() if samples == 3 else pattern4() if samples == 4 else pattern()[..., 0]
     src_h = (pattern(half=True) if samples == 3 else pattern4(half=True)
@@ -203,6 +231,10 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
         l["pred"] = predictor if l["bps"] in (8, 16) or l["fmt"] else 1
     blobs = [_tiles(l["arr"], l["comp"], lzw_ours, l["pred"], l["bps"], webp_lossless)
              for l in lvls]
+    tabs = [None] * len(lvls)
+    if comp == 7 and jpegtables is not None:  # one tag 347 per level (per IFD)
+        for i, blocks in enumerate(blobs):
+            blobs[i], tabs[i] = _jpeg_tables(blocks, jpegtables, keep_tables, bad_tables)
 
     # rough layout: header | tiles | areas | ifds ; areas are small so offsets
     # are computed exactly in a second pass
@@ -233,6 +265,8 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
         if l["fmt"]:  # SampleFormat: 1 unsigned / 2 signed / 3 float / 4 complex
             ent.append((339, 3, l["samples"],
                         None if l["fmt_len"] else struct.pack("<H", l["fmt"])[:4]))
+        if tabs[i]:  # JPEGTables (tag 347): the DQT segments the blocks lack
+            ent.append((347, 7, len(tabs[i]), None))
         ent += [(284, 3, 1, struct.pack("<H", 1)[:4]),  # planar contig
                 (317, 3, 1, struct.pack("<H", l["pred"])[:4]),
                 (322, 3, 1, struct.pack("<H", TILE)[:4]),
@@ -252,9 +286,11 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
             if no > 1:
                 areas.append((330, 4 * no))
         # area layout: bps (0 if inline) | fmt (0 if inline/absent) | offs | cnts |
-        # then for geo IFDs: scale | tiepoint | geokeys | transformation | nodata |
-        # then subifds
+        # jpegtables (0 if absent) | then for geo IFDs: scale | tiepoint | geokeys |
+        # transformation | nodata | then subifds
         areas = [(258, l["bps_len"]), (339, l["fmt_len"]), (324, 4 * nt), (325, 4 * nt)]
+        if tabs[i]:
+            areas.append((347, len(tabs[i])))
         if l["geo"]:
             areas += [(33550, 24), (33922, 48), (34735, 2 * len(geokeys))]
             if rotated:
@@ -278,6 +314,8 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
                  if l["fmt_len"] else b"")
         a.extend(struct.pack("<" + "I" * nt, *([0] * nt)))   # TileOffsets (patched)
         a.extend(struct.pack("<" + "I" * nt, *cnts))
+        if tabs[i]:
+            a.extend(tabs[i])  # JPEGTables: SOI + DQT + terminator
         if l["geo"]:
             a.extend(struct.pack("<3d", psx, psy, 0.0))
             a.extend(struct.pack("<6d", 0, 0, 0, ox, oy, 0.0))
@@ -430,6 +468,18 @@ def fixtures_dir(tmp_path_factory):
               geographic=True, comp=7)
     write_cog(d / "cogjpeg1.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
               geographic=True, comp=7, samples=1)
+    write_cog(d / "cogjpt.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, comp=7, jpegtables=TBL_JPEGTM)
+    write_cog(d / "cogjpt9.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, comp=7, jpegtables=TBL_EOI)
+    write_cog(d / "cogjptne.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, comp=7, jpegtables=TBL_NONE)
+    write_cog(d / "cogjptself.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, comp=7, jpegtables=TBL_JPEGTM, keep_tables=True)
+    write_cog(d / "cogjptbad.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, comp=7, jpegtables=TBL_JPEGTM, bad_tables=True)
+    write_cog(d / "cogjpt1.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, comp=7, samples=1, jpegtables=TBL_JPEGTM)
     if _ic is not None:
         write_cog(d / "cogzstd.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
                   geographic=True, comp=50000)
@@ -522,6 +572,12 @@ COG4326 = "cog4326.tif"
 COG3857 = "cog3857.tif"
 COGJPEG = "cogjpeg.tif"  # same content, JPEG-in-TIFF blocks (compression 7)
 COGJPEG1 = "cogjpeg1.tif"  # same, single-band JPEG blocks
+COGJPT = "cogjpt.tif"  # JPEG blocks without DQT + IFD tag 347 (the GDAL layout)
+COGJPTD9 = "cogjpt9.tif"  # tag 347 terminated by the JPEG EOI (FF D9)
+COGJPTNE = "cogjptne.tif"  # tag 347 with no terminator at all
+COGJPTSELF = "cogjptself.tif"  # tag 347 declared, blocks keep their own DQT
+COGJPTBAD = "cogjptbad.tif"  # tag 347 without SOI: the splice is not a JPEG
+COGJPT1 = "cogjpt1.tif"  # single-band JPEG with tag 347 (the GRAY path)
 COGZSTD = "cogzstd.tif"  # same content, ZSTD blocks (compression 50000)
 COGPACK = "cogpack.tif"  # PackBits blocks (imagecodecs encoder)
 COGLZW = "coglzw.tif"  # LZW blocks in the pure-Python decoder's variant
