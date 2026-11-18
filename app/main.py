@@ -240,7 +240,7 @@ async def tile(z: int, x: int, y: int,
                                                               "below this become no-coverage; default "
                                                               "20, -1 disables"),
                size: int = Query(512, description="tile edge in pixels, "
-                                                  "1..1024, multiple of 16"),
+                                                  "128..1024, multiple of 16"),
                request: Request = None):
     """One tile of the COG: a square image in the requested format and size,
     addressed on the OSM/XYZ grid (z/x/y, y points down - not TMS)."""

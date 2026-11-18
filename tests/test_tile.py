@@ -277,9 +277,9 @@ def test_geojson(client, server):
 
 def test_size_and_bidx(client, server):
     z, x, y = fixture_tile()
-    r = client.get(tile_url(server, COG4326, z, x, y, size=112))
-    assert Image.open(io.BytesIO(r.content)).size == (112, 112)
-    for bad in (100, 0, 1024 + 16):  # off-grid or out of range
+    r = client.get(tile_url(server, COG4326, z, x, y, size=144))
+    assert Image.open(io.BytesIO(r.content)).size == (144, 144)
+    for bad in (100, 112, 0, 1024 + 16):  # off-grid or out of range
         assert client.get(tile_url(server, COG4326, z, x, y, size=bad)).status_code == 400
     r = client.get(tile_url(server, COG4326, z, x, y, bidx="1,1,1"))
     a = np.asarray(Image.open(io.BytesIO(r.content)))
