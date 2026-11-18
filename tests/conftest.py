@@ -47,7 +47,8 @@ def pattern(half=False):
     return a
 
 
-def _block(arr, comp, lzw_ours, predictor, bps, webp_lossless=True):
+def _block(arr, comp, lzw_ours, predictor, bps, webp_lossless=True,
+           jxl_lossless=True):
     """One encoded TIFF block: bit-packed when bps=1 (masks), horizontally
     differenced when predictor=2, then compressed."""
     if bps == 1:
@@ -69,6 +70,11 @@ def _block(arr, comp, lzw_ours, predictor, bps, webp_lossless=True):
             # blocks, irrelevant - the level is refused at open, never decoded
         return (_ic.webp_encode(arr, lossless=True) if webp_lossless
                 else _ic.webp_encode(arr, lossless=False, level=75))
+    if comp in (50002, 52546):  # TIFF JPEG XL (GDAL / DNG 1.7 ids): one bare
+        # codestream per block, the layout GDAL's libjxl codec writes
+        return (_ic.jpegxl_encode(arr, lossless=True) if jxl_lossless
+                else _ic.jpegxl_encode(arr, lossless=False, distance=1.0,
+                                       effort=5))
     if comp == 50000:
         return _ic.zstd_encode(raw)
     if comp == 5:  # TIFF LZW: "ours" = the variant the pure-Python decoder reads
@@ -78,11 +84,12 @@ def _block(arr, comp, lzw_ours, predictor, bps, webp_lossless=True):
     return zlib.compress(raw)
 
 
-def _tiles(arr, comp=8, lzw_ours=True, predictor=1, bps=8, webp_lossless=True):
+def _tiles(arr, comp=8, lzw_ours=True, predictor=1, bps=8, webp_lossless=True,
+           jxl_lossless=True):
     th = tw = TILE
     h, w = arr.shape[:2]
     return [_block(arr[tj * th:(tj + 1) * th, ti * tw:(ti + 1) * tw],
-                   comp, lzw_ours, predictor, bps, webp_lossless)
+                   comp, lzw_ours, predictor, bps, webp_lossless, jxl_lossless)
             for tj in range(h // th) for ti in range(w // tw)]
 
 
@@ -189,14 +196,16 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
               nodata=None, geokeys=None, lzw_ours=True, predictor=1, mask=False,
               rotated=False, subifd=False, holes=False, webp_lossless=True,
               fmt=None, sentinel=None, jpegtables=None, keep_tables=False,
-              bad_tables=False):
+              bad_tables=False, jxl_lossless=True):
     """Classic tiled little-endian TIFF: level 0 + a 2x internal overview, plus
     optional extras - a 1-bit internal coverage mask (NewSubfileType & 4), a
     horizontal-differencing predictor, GDAL_NODATA, ExtraSamples=ALPHA, a
     ModelTransformation (rotated raster, which the reader must refuse),
     overviews as SubIFDs (tag 330) instead of the linked IFD chain,
     count-0 blocks (cog_merger holes: absent data in a merged footprint),
-    WebP blocks (compression 50001, lossless unless webp_lossless=False), a
+    WebP blocks (compression 50001, lossless unless webp_lossless=False), JPEG XL
+    blocks (50002, the GDAL/libtiff codec id, or 52546 as DNG 1.7 spells it: one
+    bare codestream per block, lossless unless jxl_lossless=False), a
     declared SampleFormat (tag 339: 1 unsigned, 2 signed, 3 float, 4 complex for
     a file that must be refused) with the pattern widened to that depth, or a
     nodata sentinel written over the first column (-9999, NaN: values a reader
@@ -224,12 +233,14 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
         bits = np.zeros((H, W), np.uint8)
         bits[:, W // 3:] = 1
         lvls.append(dict(arr=bits, sub=4, samples=1, bps=1, comp=8, phot=1, geo=False))
-    for l in lvls:  # a lone SHORT fits inline in the IFD; 1-bit masks never difference
-        l["bps_len"] = 2 * l["samples"] if l["samples"] > 1 else 0
+    for l in lvls:  # a value array of <= 4 bytes must stay inline in the IFD
+        # entry (TIFF rule); 1-bit masks never difference
+        l["bps_len"] = 2 * l["samples"] if l["samples"] > 2 else 0
         l["fmt"] = 0 if l["bps"] == 1 else (fmt or 1)  # 0 = tag 339 absent (unsigned)
-        l["fmt_len"] = 2 * l["samples"] if l["fmt"] and l["samples"] > 1 else 0
+        l["fmt_len"] = 2 * l["samples"] if l["fmt"] and l["samples"] > 2 else 0
         l["pred"] = predictor if l["bps"] in (8, 16) or l["fmt"] else 1
-    blobs = [_tiles(l["arr"], l["comp"], lzw_ours, l["pred"], l["bps"], webp_lossless)
+    blobs = [_tiles(l["arr"], l["comp"], lzw_ours, l["pred"], l["bps"],
+                    webp_lossless, jxl_lossless)
              for l in lvls]
     tabs = [None] * len(lvls)
     if comp == 7 and jpegtables is not None:  # one tag 347 per level (per IFD)
@@ -255,7 +266,8 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
             (254, 4, 1, struct.pack("<I", l["sub"])[:4]),
             (256, 4, 1, struct.pack("<I", l["arr"].shape[1])[:4]),
             (257, 4, 1, struct.pack("<I", l["arr"].shape[0])[:4]),
-            (258, 3, l["samples"], None if l["bps_len"] else struct.pack("<H", l["bps"])[:4]),
+            (258, 3, l["samples"], None if l["bps_len"]
+             else struct.pack("<" + "H" * l["samples"], *([l["bps"]] * l["samples"]))),
             (259, 3, 1, struct.pack("<H", l["comp"])[:4]),
             (262, 3, 1, struct.pack("<H", l["phot"])[:4]),
             (277, 3, 1, struct.pack("<H", l["samples"])[:4]),
@@ -264,7 +276,9 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
             ent.append((338, 3, 1, struct.pack("<H", 2)[:4]))
         if l["fmt"]:  # SampleFormat: 1 unsigned / 2 signed / 3 float / 4 complex
             ent.append((339, 3, l["samples"],
-                        None if l["fmt_len"] else struct.pack("<H", l["fmt"])[:4]))
+                        None if l["fmt_len"]
+                        else struct.pack("<" + "H" * l["samples"],
+                                         *([l["fmt"]] * l["samples"]))))
         if tabs[i]:  # JPEGTables (tag 347): the DQT segments the blocks lack
             ent.append((347, 7, len(tabs[i]), None))
         ent += [(284, 3, 1, struct.pack("<H", 1)[:4]),  # planar contig
@@ -495,6 +509,18 @@ def fixtures_dir(tmp_path_factory):
                   geographic=True, comp=50001, samples=4)  # RGBA WebP + ExtraSamples
         write_cog(d / "cogwebp1.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
                   geographic=True, comp=50001, samples=1)  # refused: not RGB/RGBA
+        write_cog(d / "cogjxl.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+                  geographic=True, comp=50002)  # lossless JPEG XL codestreams
+        write_cog(d / "cogjxll.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+                  geographic=True, comp=50002, jxl_lossless=False)  # distance 1.0
+        write_cog(d / "cogjxla.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+                  geographic=True, comp=50002, samples=4)  # RGBA JXL + ExtraSamples
+        write_cog(d / "cogjxlg.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+                  geographic=True, comp=50002, samples=1)  # gray: valid JXL, unlike WebP
+        write_cog(d / "cogjxld.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+                  geographic=True, comp=52546)  # same blocks, DNG 1.7 codec id
+        write_cog(d / "cogjxl2.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+                  geographic=True, comp=50002, samples=2)  # gray+alpha: refused
     write_cog(d / "coglzw.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
               geographic=True, comp=5)  # LZW in the variant _lzw_decode reads
     write_cog(d / "cog16.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
@@ -592,6 +618,12 @@ COGWEBP = "cogwebp.tif"  # same content, lossless WebP blocks (compression 50001
 COGWEBPL = "cogwebpl.tif"  # lossy WebP blocks (VP8, 4:2:0)
 COGWEBPA = "cogwebpa.tif"  # RGBA WebP blocks + ExtraSamples (transparent hole)
 COGWEBP1 = "cogwebp1.tif"  # single-band WebP: refused at open (not RGB/RGBA)
+COGJXL = "cogjxl.tif"  # lossless JPEG XL blocks (GDAL's codec id 50002)
+COGJXLL = "cogjxll.tif"  # lossy JPEG XL blocks (distance 1.0, GDAL default)
+COGJXLA = "cogjxla.tif"  # RGBA JPEG XL + ExtraSamples (transparent hole)
+COGJXLG = "cogjxlg.tif"  # single-band gray JPEG XL (valid JXL, refused as WebP)
+COGJXLD = "cogjxld.tif"  # JPEG XL blocks under the DNG 1.7 codec id 52546
+COGJXL2 = "cogjxl2.tif"  # 2-sample (gray+alpha) JPEG XL: refused at open
 COGSUB = "cogsub.tif"  # overviews via SubIFDs (tag 330), empty IFD chain
 COGHOLE = "coghole.tif"  # east block column: count 0 = no-data merger holes
 COGBADCRS = "cogbadcrs.tif"  # geographic EPSG:42304 -> refused

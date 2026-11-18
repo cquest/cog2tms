@@ -10,6 +10,7 @@ from app import tiles
 from app.httprange import LocalReader
 from .conftest import (COG4326, COGALPHA, COGJPT, COGJPT1, COGJPTBAD, COGJPTD9,
                        COGJPTNE, COGJPTSELF, COGLZW, COGLZWLIB, COGJPEG, COGJPEG1,
+                       COGJXL, COGJXL2, COGJXLA, COGJXLG, COGJXLD, COGJXLL,
                        COGPACK, COGPRED, COGWEBP, COGWEBPA, COGWEBPL, COGZSTD,
                        TBL_JPEGTM, TILE, _block, _jpeg_tables, fixture_tile,
                        pattern, tile_url)
@@ -151,7 +152,8 @@ def test_threaded_decode_needs_a_gil_free_codec_and_a_big_window():
     lzw_par = g._ic is not None  # imagecodecs LZW releases the GIL, ours is Python
     webp_par = g._ic is not None  # libwebp in imagecodecs releases the GIL
     for comp, expect in ((1, False), (5, lzw_par), (32773, False), (8, True),
-                         (32946, True), (50000, False), (50001, webp_par)):
+                         (32946, True), (50000, False), (50001, webp_par),
+                         (50002, False), (52546, False)):  # jpegxl keeps the GIL
         lvl.compression = comp
         assert g._threaded_decode(lvl, 4) is expect
     lvl.compression = 7
@@ -319,6 +321,107 @@ def test_webp_pillow_fallback(fixtures_dir, monkeypatch):
     monkeypatch.setattr(g, "_ic", None)
     pil = _rgb_valid(*_render(fixtures_dir, COGWEBP))
     assert (ics == pil).all()
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_jxl_lossless_fixture_renders(fixtures_dir):
+    """Lossless JPEG XL blocks (GDAL's codec 50002): bit-identical to the
+    deflate fixture - the libjxl lossless round trip is exact."""
+    ref = _rgb_valid(*_render(fixtures_dir, COG4326))
+    assert (_rgb_valid(*_render(fixtures_dir, COGJXL)) == ref).all()
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_jxl_dng_code_renders(fixtures_dir):
+    """DNG 1.7 spells the same codestream with codec id 52546: identical
+    pixels to the 50002 fixture."""
+    ref = _rgb_valid(*_render(fixtures_dir, COGJXL))
+    assert (_rgb_valid(*_render(fixtures_dir, COGJXLD)) == ref).all()
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_jxl_lossy_fixture_renders(fixtures_dir):
+    """Lossy JPEG XL (distance 1.0, GDAL's default): the flat-color fixture
+    keeps the drift small (measured: 0.4 / 13)."""
+    ref, refv = _render(fixtures_dir, COG4326)
+    rgb, valid = _render(fixtures_dir, COGJXLL)
+    assert valid.sum() == refv.sum() > 0
+    diff = np.abs(rgb.astype(int) - ref.astype(int))
+    assert diff.mean() < 2 and diff.max() < 16
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_jxl_gray_fixture(fixtures_dir):
+    """Single-band gray JPEG XL renders (a codestream may carry one channel,
+    unlike WebP whose single-band levels are refused at open): the red
+    channel of the pattern comes back bit-exact."""
+    ref, _ = _render(fixtures_dir, COG4326)
+    rgb, valid = _render(fixtures_dir, COGJXLG)
+    assert valid.all()
+    assert (rgb[..., 0] == ref[..., 0]).all()
+    assert (rgb[..., 0] == rgb[..., 1]).all() and (rgb[..., 1] == rgb[..., 2]).all()
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_jxl_rgba_fixture(fixtures_dir):
+    """RGBA JPEG XL + ExtraSamples: the codestream's alpha drives coverage
+    exactly like the deflate RGBA fixture."""
+    ref = _rgb_valid(*_render(fixtures_dir, COGALPHA))
+    assert (_rgb_valid(*_render(fixtures_dir, COGJXLA)) == ref).all()
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_jxl_block_guards():
+    """Undecodable bytes surface as a CogError (libjxl's own exception never
+    leaks), and a codestream that disagrees with the level is refused instead
+    of cast into invented pixels: band count, tile shape (shrunken edge blocks
+    are padded to the full tile like WebP/JPEG), sample type."""
+    import imagecodecs as ic
+    rng = np.random.default_rng(8)
+    with pytest.raises(g.CogError, match="JPEG XL"):
+        g.CogFile.__new__(g.CogFile)._decode(_lvl(50002), b"not a codestream")
+    raw = ic.jpegxl_encode(
+        np.ascontiguousarray(rng.integers(0, 256, (64, 64, 4), dtype=np.uint8)),
+        lossless=True)
+    with pytest.raises(g.CogError, match="JPEG XL block shape"):
+        g.CogFile.__new__(g.CogFile)._decode(_lvl(50002), raw)  # 4-ch vs 3 declared
+    lvl = _lvl(50002)
+    lvl.samples = 4
+    assert g.CogFile.__new__(g.CogFile)._decode(lvl, raw).shape == (64, 64, 4)
+    lvl16 = _lvl(50002)
+    lvl16.samples, lvl16.dtype = 1, np.dtype("u1")  # 8-bit level vs 16-bit codestream
+    with pytest.raises(g.CogError, match="JPEG XL block dtype"):
+        g.CogFile.__new__(g.CogFile)._decode(
+            lvl16, ic.jpegxl_encode(np.full((64, 64), 300, np.uint16), lossless=True))
+    shr = ic.jpegxl_encode(
+        np.ascontiguousarray(rng.integers(0, 256, (40, 64, 3), dtype=np.uint8)),
+        lossless=True)
+    shr_dec = ic.jpegxl_decode(shr)
+    a = g.CogFile.__new__(g.CogFile)._decode(_lvl(50002), shr)  # 64x64 tile
+    assert a.shape == (64, 64, 3) and (a[:40] == shr_dec).all() and not a[40:].any()
+    small = _lvl(50002)
+    small.tilew = small.tileh = 32
+    with pytest.raises(g.CogError, match="JPEG XL block shape"):
+        g.CogFile.__new__(g.CogFile)._decode(small, shr)
+
+
+def test_jxl_requires_imagecodecs(fixtures_dir, monkeypatch):
+    """No Pillow fallback exists for JXL (our Pillow cannot read it): without
+    imagecodecs the blocks are refused, and the refusal names the dependency."""
+    monkeypatch.setattr(g, "_ic", None)
+    with pytest.raises(g.CogError, match="JPEG XL blocks require imagecodecs"):
+        _render(fixtures_dir, COGJXL)
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_jxl_gray_alpha_refused(fixtures_dir, client, server):
+    """2-sample gray+alpha JXL is a real GDAL formulation, but our pipeline
+    only applies an alpha band from the 4th sample on: refused at open (404),
+    never half-supported pixels."""
+    with pytest.raises(g.CogError, match="JPEG XL blocks must be"):
+        _render(fixtures_dir, COGJXL2)
+    z, x, y = fixture_tile()
+    assert client.get(tile_url(server, COGJXL2, z, x, y)).status_code == 404
 
 
 def test_pure_packbits_decode_golden():

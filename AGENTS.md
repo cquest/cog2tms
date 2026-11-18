@@ -70,6 +70,11 @@ pytest-cov, httpx.
   full tile at edges like JPEG; 8-bit RGB/RGBA only (else refused at open),
   straight (never premultiplied) alpha, decoded by imagecodecs/libwebp with a
   Pillow fallback — pixels identical to GDAL/libwebp,
+  **JPEG XL (50002, DNG 1.7 spells the same codestream 52546)** — each block is
+  one standalone bare JXL codestream: no container, and unlike JPEG no tables
+  to splice; gray/RGB/RGBA in uint8/uint16/float32 (GDAL's codec set, else
+  refused at open), decoded by imagecodecs/libjxl (no Pillow fallback); the
+  codestream's shape and sample type are checked against the level,
   **old-style JPEG**: blocks may lack their tables — GDAL moves the DQT to the IFD
   `JPEGTables` tag 347 (`SOI` + DQT + `FF7F`/`FFD9`/nothing; the DHT stay per
   block, they differ block by block) → splice tag (minus trailing EOI) + block
@@ -215,7 +220,7 @@ cog2tms/
 │   ├── test_retries.py    # fault injection: 429/5xx retries, negative cache
 │   ├── test_versions.py   # coherence when the COG is replaced under one URL
 │   ├── test_redirects.py  # own 30x walking + per-hop check_url + target moves
-│   ├── test_codecs.py     # JPEG-in-TIFF fixtures, codec parity, ZSTD, threaded decode
+│   ├── test_codecs.py     # JPEG-in-TIFF fixtures, codec parity, ZSTD/JPEG-XL, threaded decode
 │   ├── test_pixels.py     # 16-bit rescale, nodata (+ SampleFormat signed/float, NaN),
 │   │                      # alpha, internal mask, sliced index,
 │   │                      # pixel-center 1:1 warp, sharpen gating
@@ -272,6 +277,8 @@ JPEG-in-TIFF — also stored the GDAL way, DQT moved to the IFD `JPEGTables` tag
 347 (blob ending `FF7F`/`FFD9`/nothing, blocks keeping their own DQT, and a blob
 without SOI) — single-band JPEG, LZW (both dialects)/PackBits/ZSTD/predictor-2,
 lossless + lossy **WebP** blocks (RGB, RGBA+alpha, single-band refused),
+lossless + lossy **JPEG XL** blocks (RGB, RGBA+alpha, gray, 2-sample refused,
+DNG id 52546),
 16-bit single band, GDAL_NODATA, ExtraSamples alpha, 1-bit internal mask,
 ModelTransformation, unsupported CRS, SubIFD-published overviews (empty chain),
 count-0 merger-hole blocks (bogus past-EOF offsets), **SampleFormat** fixtures
@@ -365,6 +372,13 @@ behaviors (do not break):
   drives `valid`, libwebp's all-opaque-alpha plane drop is backfilled with
   255, Pillow fallback identical, shrunken edge blocks padded to the full
   tile, garbage blocks → `CogError`, 1-band WebP levels refused at open (404);
+  **JPEG XL** lossless byte-identical to deflate, lossy within tolerance
+  (0.4 / 13 on the flat fixture), gray levels render (a codestream may carry
+  one channel, unlike WebP) but 2-sample gray+alpha is refused at open (404:
+  the pipeline only applies sample-4 alpha), DNG id 52546 gives the same
+  pixels, shrunken edge blocks padded, band-count or sample type
+  disagreeing with the level
+  → `CogError`, no imagecodecs → `CogError` (no Pillow fallback);
   pooled decode byte-identical to inline;
   `_threaded_decode` gating (GIL-free codec + ≥1 Mpx); the pure-Python fallbacks
   tested directly: `_packbits_decode` golden byte sequences, `_lzw_decode`
@@ -412,7 +426,8 @@ by ALPN, capped bodies), then the sample-format pass: `SampleFormat` read,
 nodata compared without a cast (no more 500 on `-9999`/NaN), signed and float
 pixels rendered behind a mandatory `rescale`, then the GDAL JPEG layout (IFD tag
 347) covered by offline fixtures — its splice pinned bit-identical to
-self-contained blocks, and an undecodable block is a 404 instead of a 500.
+self-contained blocks, and an undecodable block is a 404 instead of a 500, then
+JPEG XL decode (codec 50002, DNG 1.7's 52546) through imagecodecs/libjxl.
 
 ## Follow-ups
 
@@ -443,7 +458,7 @@ self-contained blocks, and an undecodable block is a 404 instead of a 500.
   `quality=src` via DQT estimation. Rejected for `auto`: webp is smaller than a
   source-quality jpeg re-encode. JPEG-XL *output* also on hold
   (`imagecodecs.jpegxl_*` decodes; Pillow cannot write JXL).
-- Close to free: LERC/CCITT/JPEG-XL *decode* (new `comp` dispatch branches +
+- Close to free: LERC/CCITT *decode* (new `comp` dispatch branches +
   fixtures); average-area resampling option (`resampling=`); rescale percentile
   auto; BigTIFF offline fixture (today only the network COGs exercise it);
   BigTIFF overview masks on more samples.

@@ -49,6 +49,8 @@ _TILEW, _TILEH, _TILOFFS, _TILCNTS, _PREDICTOR = 322, 323, 324, 325, 317
 _TIEPOINT, _SCALE, _MODELTRANSF = 33922, 33550, 34264
 _SUBIFDS = 330  # alternate overview layout: IFD offsets here, chain not used
 _WEBP = 50001  # libtiff's WebP codec id: each block is a whole RIFF/WEBP image
+_JXL, _JXL_DNG = 50002, 52546  # JPEG XL (GDAL/libtiff id; DNG 1.7 spells the same
+# codestream 52546): each block is one standalone bare JXL codestream
 _GEOKEYS, _GEODOUBLE, _JPEGTABLES, _GDAL_NODATA = 34735, 34736, 347, 42113
 
 # (BitsPerSample, SampleFormat) -> numpy dtype code: signed and float rasters
@@ -86,7 +88,9 @@ def _threaded_decode(lvl: "_Level", n: int) -> bool:
     if lvl.compression == _WEBP:
         return _ic is not None  # libwebp (imagecodecs) releases the GIL, Pillow not
     # zlib releases the GIL; imagecodecs PackBits and ZSTD do not (but are fast
-    # enough inline: a whole window of them decodes in around a millisecond)
+    # enough inline: a whole window of them decodes in around a millisecond);
+    # JPEG XL keeps the GIL and threads make it worse (measured 0.62x/0.36x at
+    # 2/4 threads - libjxl parallelizes inside one call, not across Python ones)
     return lvl.compression in (8, 32946)
 
 
@@ -237,6 +241,14 @@ class _Level:
                                           or self.photometric != 2):
             # libwebp only decodes whole 8-bit RGB/RGBA images (what GDAL writes)
             raise CogError("WebP blocks must be 8-bit RGB/RGBA")
+        if self.compression in (_JXL, _JXL_DNG) and (
+                (self.bps, self.fmt) not in ((8, 1), (16, 1), (32, 3))
+                or self.samples not in (1, 3, 4)
+                or self.photometric != (1 if self.samples == 1 else 2)):
+            # the types GDAL's libjxl codec encodes (float16 is refused by _DT);
+            # unlike WebP, single-band gray codestreams are legitimate JXL
+            raise CogError("JPEG XL blocks must be gray/RGB/RGBA of "
+                           "uint8/uint16/float32")
         if _TILOFFS not in tags or _TILCNTS not in tags:
             raise CogError("missing TileOffsets/TileByteCounts")
         self._lazy = (_TILOFFS, _TILCNTS)
@@ -537,6 +549,13 @@ class CogFile:
             return a
         if comp == _WEBP:
             return self._decode_webp(raw, th, tw, s)
+        if comp in (_JXL, _JXL_DNG):
+            a = self._decode_jxl(raw, th, tw, s)
+            if a.dtype != lvl.dtype:  # the codestream must supply the declared
+                # sample type, as GDAL checks its basic info: casting would
+                # invent pixels
+                raise CogError(f"JPEG XL block dtype {a.dtype} != raster {lvl.dtype}")
+            return a
         if comp == 1:
             buf = raw
         elif comp in (8, 32946):
@@ -585,6 +604,29 @@ class CogFile:
             raise CogError(f"unexpected WebP block shape {a.shape}")
         if a.shape[0] != th or a.shape[1] != tw:  # writer shrank the edge block
             pad = np.zeros((th, tw, samples), np.uint8)
+            pad[: a.shape[0], : a.shape[1]] = a
+            a = pad
+        return a
+
+    @staticmethod
+    def _decode_jxl(raw: bytes, th: int, tw: int, samples: int) -> np.ndarray:
+        # TIFF JPEG XL (GDAL's codec 50002; DNG 1.7 spells the same codestream
+        # 52546): each block is one standalone bare codestream - no container,
+        # and unlike JPEG no shared tables to splice; edge blocks, like WebP,
+        # are padded to the full tile size. imagecodecs/libjxl does the work
+        # (Pillow cannot read JXL in our builds).
+        if _ic is None:
+            raise CogError("JPEG XL blocks require imagecodecs")
+        try:
+            a = _ic.jpegxl_decode(raw)
+        except Exception:  # libjxl raises its own error type
+            raise CogError("cannot decode JPEG XL block") from None
+        if a.ndim == 2:  # a gray codestream comes back without channel axis
+            a = a[..., None]
+        if a.shape[0] > th or a.shape[1] > tw or a.shape[2] != samples:
+            raise CogError(f"unexpected JPEG XL block shape {a.shape}")
+        if a.shape[0] != th or a.shape[1] != tw:  # writer shrank the edge block
+            pad = np.zeros((th, tw, samples), a.dtype)
             pad[: a.shape[0], : a.shape[1]] = a
             a = pad
         return a
