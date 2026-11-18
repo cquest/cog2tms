@@ -36,7 +36,7 @@ def test_webp_tile(client, server):
     r = client.get(tile_url(server, COG4326, z, x, y, format="webp"))
     assert r.status_code == 200 and r.headers["content-type"] == "image/webp"
     w = _pix(r)
-    assert w.shape[:2] == (256, 256)
+    assert w.shape[:2] == (512, 512)
     # saturated fixture colors (pure red/0) are webp's worst case: probe max 40
     assert np.abs(w[..., :3].astype(int) - png[..., :3]).max() < 48
 
@@ -49,7 +49,7 @@ def test_webp_lossless_is_bit_exact(client, server, monkeypatch):
     z, x, y = fixture_tile()
     a = _pix(client.get(tile_url(server, COG4326, z, x, y, format="webp", blackmax=200)))
     b = _pix(client.get(tile_url(server, COG4326, z, x, y, format="png", blackmax=200)))
-    assert a.shape == (256, 256, 4) and a[..., 3].min() == 0  # blackmax -> real alpha
+    assert a.shape == (512, 512, 4) and a[..., 3].min() == 0  # blackmax -> real alpha
     assert (a == b).all()
     monkeypatch.setattr(config, "WEBP_LOSSLESS", False)
     clear_caches()

@@ -58,8 +58,8 @@ dd { margin: 0; overflow-wrap: anywhere; }
   <label>format
     <select id="format"><option>auto</option><option>png</option><option>jpeg</option><option>webp</option></select></label>
   <label>quality <input id="quality" class="num" type="number" min="1" max="95" value="80"></label>
-  <label>size
-    <select id="size"><option>256</option><option>512</option></select></label>
+  <label>size <input id="size" class="num" type="number" min="16" max="1024" step="16"
+         value="512" title="tile edge in pixels, multiple of 16"></label>
   <label>blackmax <input id="blackmax" class="num" type="text" value="20"
          title="near-black pixels become transparent; -1 disables"></label>
   <label hidden><input hidden id="bidx" type="text" placeholder="1,2,3" size="6"></label>

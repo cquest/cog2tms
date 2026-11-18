@@ -239,7 +239,8 @@ async def tile(z: int, x: int, y: int,
                blackmax: str | None = Query(None, description="pixels whose brightest band is at or "
                                                               "below this become no-coverage; default "
                                                               "20, -1 disables"),
-               size: int = Query(256, description="tile edge in pixels, 1..1024"),
+               size: int = Query(512, description="tile edge in pixels, "
+                                                  "1..1024, multiple of 16"),
                request: Request = None):
     """One tile of the COG: a square image in the requested format and size,
     addressed on the OSM/XYZ grid (z/x/y, y points down - not TMS)."""
@@ -250,8 +251,8 @@ async def tile(z: int, x: int, y: int,
         raise HTTPException(400, "tile index outside matrix")
     if format not in MIME and format != "auto":
         raise HTTPException(400, "unsupported format")
-    if not 1 <= size <= 1024:
-        raise HTTPException(400, "bad size")
+    if not 128 <= size <= 1024 or size % 16:
+        raise HTTPException(400, "bad size, must be between 128 and 1024 and a multiple of 16")  # 16: jpeg macroblock / tiff block grid
     quality = max(1, min(95, quality))
     # format=auto depends only on the Accept header: webp if image/webp is
     # explicitly listed with q>0, else png. Wildcards (image/*, */*: JOSM,
@@ -379,7 +380,9 @@ async def tilejson(u: str = Query(..., description="COG url (http/https)")):
     res0 = 2 * math.pi * crs.R_WEB / 256.0
     return JSONResponse({
         "tilejson": "2.2.0", "name": "cog2tms", "scheme": "xyz",
-        "tiles": ["/c2t/{z}/{x}/{y}?u=" + u],
+        # minzoom/maxzoom are computed on a 256 px grid: pin the size so the
+        # advertised zooms mean what TileJSON says
+        "tiles": [f"/c2t/{{z}}/{{x}}/{{y}}?u={u}&size=256"],
         "bbox": [round(v, 6) for v in bbox],
         "minzoom": max(0, min(config.MAX_ZOOM, math.floor(math.log2(res0 / max(coarse_gsd, 1e-9))))),
         "maxzoom": max(0, min(config.MAX_ZOOM, math.ceil(math.log2(res0 / gsd)))),

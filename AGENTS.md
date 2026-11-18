@@ -12,10 +12,12 @@ Code style: **minimal, idiomatic, no over-engineering**.
 ```
 GET /                                    web UI: map preview
 GET /static/…                            UI assets (vendored maplibre-gl, maplibre_app.js)
-GET /c2t/{z}/{x}/{y}?u=<cog url>         tile: format=png|jpeg|webp|auto, quality, size,
+GET /c2t/{z}/{x}/{y}?u=<cog url>         tile: format=png|jpeg|webp|auto, quality, size
+                                         (512 by default, 128..1024 multiple of 16),
                                          bidx, rescale, blackmax
 GET /c2t/{z}/{x}/{y}.geojson?u=…         COG footprint ring (debug)
-GET /c2t.tms.json?u=…                    TileJSON (bbox, minzoom/maxzoom)
+GET /c2t.tms.json?u=…                    TileJSON (bbox, minzoom/maxzoom; the tile
+                                         template pins size=256 to match its zoom math)
 GET /healthz
 GET /robots.txt                          "User-agent: * Disallow: /c2t" + X-Robots-Tag
                                          (nofollow, noimageindex) on every response
@@ -57,6 +59,7 @@ raster, unreadable samples), `502` (upstream error).
 | Out-of-bounds tiles | **200 + empty tile**: fully transparent PNG/WebP (alpha=0); JPEG has no alpha → solid fill, configurable `EMPTY_TILE_BG` (default `0,0,0`). |
 | Output formats | **PNG, JPEG, WebP** + `format=auto` = the `Accept` header only: webp iff `image/webp` (q>0) is listed explicitly, else png; the source codec (JPEG-in-TIFF) plays **no** role. **Wildcards (`image/*`, `*/*`) never select webp** — JOSM and plain clients send them and cannot decode it. WebP = Pillow `exact=True` (without it, RGB is blended to a background where alpha<255) + `method=0`; `WEBP_LOSSLESS=1` → lossless+exact = bit-identical to PNG. The resolved format is part of the tile-cache key. PNG stays the default when `format` is omitted. |
 | Size limit | **No 413 based on Content-Length** (multi-GB COGs are legitimate): validation via magic bytes `II*`/`MM*` + `MAX_ZOOM`. |
+| Default tile size | **512 px** (`size` accepted 128..1024 but only as a **multiple of 16** — jpeg macroblock / TIFF block grid — off-grid is a `400`). Measured against the four 256 children one zoom deeper (same on-screen GSD, jpeg q80, headers counted): always lower client volume — −5 % at z13 to −37 % at z19 on COG_SMALL — and ≈4× fewer upstream bytes (the children re-fetch the boundary blocks; empty children pay 4× the header+fill overhead). TileJSON answers pin `size=256` because its minzoom/maxzoom assume a 256 px grid. |
 
 Stack: Python 3.12, FastAPI + uvicorn, curl_cffi (Range reads, h2 by ALPN),
 numpy, Pillow, simplejpeg, imagecodecs, opencv-python-headless; dev: pytest,
@@ -288,8 +291,11 @@ samples, predictor 3, predictor 2 on floats, `GDAL_NODATA="N/A"`), a non-TIFF
 file — served by a local Range-capable HTTP server that counts bytes. Pinned
 behaviors (do not break):
 
-- center tile PNG; **XYZ convention** (a northern-half red square lands in the
-  tile's upper half); **reprojection parity** 4326 vs 3857 (MSE < 100);
+- center tile PNG; **default tile size 512** (the no-`size` endpoint returns
+  512×512, an on-grid `size=112` still overrides, an off-grid `size` is a 400);
+  **XYZ convention** (a northern-half red
+  square lands in the tile's upper half); **reprojection parity** 4326 vs 3857
+  (MSE < 100);
 - **edge tiles**: transparent >2 tile-px outside the footprint (both CRS paths),
   never clamped edge values;
 - **blackmax**: split exact (`max|band| ≤ blackmax` → transparent, `>` kept),
@@ -420,8 +426,10 @@ behaviors (do not break):
 
 Roadmap 1–4 done (skeleton/PNG/pool; JPEG/bidx/rescale/geojson/TileJSON/
 healthz/CORS; anti-SSRF + fixtures + network tests; Docker + README + public-
-COG verification), plus WebP and `format=auto` on top, then the sharpness fix
-(pixel-center sampling + unsharp) and the transport swap to curl_cffi (HTTP/2
+COG verification), plus WebP and `format=auto` on top, then the default tile
+size 512 (client volume measured against the four 256 children), then the
+sharpness fix (pixel-center sampling + unsharp) and the transport swap to
+curl_cffi (HTTP/2
 by ALPN, capped bodies), then the sample-format pass: `SampleFormat` read,
 nodata compared without a cast (no more 500 on `-9999`/NaN), signed and float
 pixels rendered behind a mandatory `rescale`, then the GDAL JPEG layout (IFD tag

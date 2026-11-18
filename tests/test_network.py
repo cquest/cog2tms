@@ -81,18 +81,19 @@ def test_edge_tile_transparent(client):
         _t(client, f"/c2t/13/4064/2995?u={COG_SMALL}&blackmax=-1").content)))  # threshold off: test is about edges
     v = a[..., 3] > 0
     assert v.sum() > 20000  # most of the footprint half still renders
-    w, s, e, n = _t(client, f"/c2t.tms.json?u={COG_SMALL}").json()["bbox"]
-    bx0, by0 = WEBMERCATOR.to_xy(w, s)
-    bx1, by1 = WEBMERCATOR.to_xy(e, n)
+    npx = a.shape[0]  # pixel grid of the served tile (the default 512)
+    wl, sl, el, nl = _t(client, f"/c2t.tms.json?u={COG_SMALL}").json()["bbox"]
+    bx0, by0 = WEBMERCATOR.to_xy(wl, sl)
+    bx1, by1 = WEBMERCATOR.to_xy(el, nl)
     tx0, ty0, tx1, ty1 = tile_web_bounds(13, 4064, 2995)
-    cell = (tx1 - tx0) / 256
-    u = (np.arange(256) + 0.5) / 256
+    cell = (tx1 - tx0) / npx
+    u = (np.arange(npx) + 0.5) / npx
     dx = np.maximum.reduce([bx0 - (tx0 + (tx1 - tx0) * u),
                             (tx0 + (tx1 - tx0) * u) - bx1,
-                            np.zeros(256)])[None, :]
+                            np.zeros(npx)])[None, :]
     dy = np.maximum.reduce([by0 - (ty1 + (ty0 - ty1) * u),
                             (ty1 + (ty0 - ty1) * u) - by1,
-                            np.zeros(256)])[:, None]
+                            np.zeros(npx)])[:, None]
     assert not (v & ((dx > 2 * cell) | (dy > 2 * cell))).any()
 
 

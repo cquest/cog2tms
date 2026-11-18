@@ -117,7 +117,7 @@ def test_center_tile_png(client, server):
     r = client.get(tile_url(server, COG4326, z, x, y))
     assert r.status_code == 200 and r.headers["content-type"] == "image/png"
     im = Image.open(io.BytesIO(r.content))
-    assert im.size == (256, 256)
+    assert im.size == (512, 512)  # default tile size, pinned here
     a = np.asarray(im)
     assert (a[..., 3] > 0).all()  # centre tile fully covered by the footprint
 
@@ -130,7 +130,7 @@ def test_xyz_convention(client, server):
     a = np.asarray(Image.open(io.BytesIO(r.content)))
     red = (a[..., 0] > 200) & (a[..., 1] < 60) & (a[..., 2] < 60)
     ys = np.nonzero(red.any(axis=1))[0]
-    assert len(ys) > 10 and ys.mean() < 128  # red square above the tile mid-line
+    assert len(ys) > 10 and ys.mean() < a.shape[0] / 2  # red square above the tile mid-line
 
 
 def test_jpeg(client, server):
@@ -138,7 +138,7 @@ def test_jpeg(client, server):
     r = client.get(tile_url(server, COG4326, z, x, y, format="jpeg", quality=60))
     assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
     im = Image.open(io.BytesIO(r.content))
-    assert im.size == (256, 256) and im.mode == "RGB"
+    assert im.size == (512, 512) and im.mode == "RGB"
 
 
 def test_out_of_bounds(client, server):
@@ -147,7 +147,7 @@ def test_out_of_bounds(client, server):
     r = client.get(tile_url(server, COG4326, z, x + 40, y))
     assert r.status_code == 200
     a = np.asarray(Image.open(io.BytesIO(r.content)))
-    assert a.shape == (256, 256, 4) and a[..., 3].max() == 0
+    assert a.shape == (512, 512, 4) and a[..., 3].max() == 0
     r = client.get(tile_url(server, COG4326, z, x + 40, y, format="jpeg"))
     im = np.asarray(Image.open(io.BytesIO(r.content)))
     assert (im == np.array([0, 0, 0])).all()  # EMPTY_TILE_BG default
@@ -165,9 +165,10 @@ def test_edge_tile_transparent(client, server):
             client.get(tile_url(server, cog, z, x, yc)).content)))
         v = a[..., 3] > 0
         assert 0.2 < v.mean() < 0.6, (cog, v.mean())
+        n = a.shape[0]
         tx0, _, tx1, _ = tile_web_bounds(z, x, yc)
-        centers = tx0 + (tx1 - tx0) * (np.arange(256) + 0.5) / 256
-        beyond_2px = centers > e + 2 * (tx1 - tx0) / 256
+        centers = tx0 + (tx1 - tx0) * (np.arange(n) + 0.5) / n
+        beyond_2px = centers > e + 2 * (tx1 - tx0) / n
         assert not v[:, beyond_2px].any(), (cog, v[:, beyond_2px].sum())
 
 
@@ -276,8 +277,10 @@ def test_geojson(client, server):
 
 def test_size_and_bidx(client, server):
     z, x, y = fixture_tile()
-    r = client.get(tile_url(server, COG4326, z, x, y, size=100))
-    assert Image.open(io.BytesIO(r.content)).size == (100, 100)
+    r = client.get(tile_url(server, COG4326, z, x, y, size=112))
+    assert Image.open(io.BytesIO(r.content)).size == (112, 112)
+    for bad in (100, 0, 1024 + 16):  # off-grid or out of range
+        assert client.get(tile_url(server, COG4326, z, x, y, size=bad)).status_code == 400
     r = client.get(tile_url(server, COG4326, z, x, y, bidx="1,1,1"))
     a = np.asarray(Image.open(io.BytesIO(r.content)))
     v = a[..., 3] > 0

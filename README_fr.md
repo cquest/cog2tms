@@ -16,7 +16,7 @@ servit des tuiles Z/X/Y (schéma OSM) reprojetées en EPSG:3857 (Web Mercator).
 
 ```
 GET /                                       # interface web : aperçu MapLibre (fond vectoriel) + URL de tuiles
-GET /c2t/{z}/{x}/{y}?u=<url du COG>[&format=png|jpeg|webp|auto][&quality=80][&size=256]
+GET /c2t/{z}/{x}/{y}?u=<url du COG>[&format=png|jpeg|webp|auto][&quality=80][&size=512]
                       [&bidx=1,2,3][&rescale=min,max][&blackmax=0]
 GET /c2t/{z}/{x}/{y}.geojson?u=<url du COG> # empreinte du COG (debug)
 GET /c2t.tms.json?u=<url du COG>            # TileJSON (bbox, minzoom/maxzoom)
@@ -30,6 +30,8 @@ GET /openapi.json   GET /docs   GET /redoc       # schéma OpenAPI 3.1 + docs (s
   ne fait confiance qu'à l'en-tête `Accept` : webp si `image/webp` est listé
   explicitement (q>0), jamais sur les jokers (`*/*` — JOSM les envoie et ne sait
   pas décoder le webp) ; défaut png.
+- Taille de tuile par défaut `512`, `size=128..1024` restreint aux multiples de
+  `16` (macrobloc JPEG / bloc TIFF)
 - Tuiles hors de l'empreinte du COG : `200` + tuile vide — PNG/WebP
   transparents, JPEG en remplissage `EMPTY_TILE_BG`.
 - `blackmax=0..255` : les pixels quasi noirs (lisiérés d'orthophotos sans
@@ -83,7 +85,7 @@ Mesuré sur le COG de Bayonne (875 Mo, EPSG:3943) depuis un poste de travail :
 | première tuile au zoom max (index de blocs L0) | pas de coût supplémentaire |
 | rendu à chaud (blocs en cache) | ≈6 ms |
 | répétition de la même tuile (cache de tuiles) | ≈2 ms |
-| encodage d'une tuile z18 | PNG 134 Ko, WebP 11,4 Ko (≈12× plus petit, ≈2 ms), JPEG 13,5 Ko |
+| encodage d'une tuile z18 (256 px) | PNG 134 Ko, WebP 11,4 Ko (≈12× plus petit, ≈2 ms), JPEG 13,5 Ko |
 
 Les leviers derrière ces chiffres (préchargement d'en-tête, index de blocs
 paresseux, requêtes fusionnées/parallèles/multi-gammes, warp `cv2.remap`,

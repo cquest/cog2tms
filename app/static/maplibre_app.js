@@ -8,7 +8,7 @@
 const $ = (id) => document.getElementById(id);
 const MAX_ZOOM = 24;  // same ceiling as the server's MAX_ZOOM setting
 const FIELDS = ["format", "quality", "size", "blackmax", "bidx", "rescale"];
-const DEFAULTS = {format: "png", quality: "80", size: "256", blackmax: "20", bidx: "", rescale: ""};
+const DEFAULTS = {format: "png", quality: "80", size: "512", blackmax: "20", bidx: "", rescale: ""};
 const BASE_STYLE = "https://tiles.openfreemap.org/styles/bright";  // free vector MVT basemap, no key
 const BG_STYLE = {version: 8, sources: {},
                   layers: [{id: "bg", type: "background", paint: {"background-color": "#e8ebee"}}]};

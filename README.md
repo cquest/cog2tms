@@ -16,7 +16,7 @@ reprojected to EPSG:3857 (Web Mercator).
 
 ```
 GET /                                       # web UI: MapLibre preview (vector basemap) + tile URLs
-GET /c2t/{z}/{x}/{y}?u=<COG url>[&format=png|jpeg|webp|auto][&quality=80][&size=256]
+GET /c2t/{z}/{x}/{y}?u=<COG url>[&format=png|jpeg|webp|auto][&quality=80][&size=512]
                       [&bidx=1,2,3][&rescale=min,max][&blackmax=0]
 GET /c2t/{z}/{x}/{y}.geojson?u=<COG url>   # COG footprint (debug)
 GET /c2t.tms.json?u=<COG url>              # TileJSON (bbox, minzoom/maxzoom)
@@ -29,6 +29,8 @@ GET /openapi.json   GET /docs   GET /redoc       # OpenAPI 3.1 + docs (swagger-u
   (≈12× smaller than PNG on ortho tiles). `format=auto` trusts only the
   `Accept` header: webp iff `image/webp` is listed explicitly (q>0), never on
   wildcards (`*/*` — JOSM sends them and cannot decode webp); default png.
+- Default tile size `512`, `size=128..1024` restricted to multiples of `16`
+  (jpeg macroblock / TIFF block grid)
 - Tiles outside the COG footprint: `200` + empty tile — transparent PNG/WebP,
   solid `EMPTY_TILE_BG` for JPEG.
 - `blackmax=0..255`: near-black pixels (unmasked orthophoto fringes) become
@@ -81,7 +83,7 @@ Measured on the Bayonne COG (875 MB, EPSG:3943) from a workstation:
 | first tile at max zoom (L0 block index) | no extra cost |
 | warm render (blocks cached) | ≈6 ms |
 | repeat of the same tile (tile cache) | ≈2 ms |
-| z18 tile encoding | PNG 134 KB, WebP 11.4 KB (≈12× smaller, ≈2 ms), JPEG 13.5 KB |
+| z18 tile encoding (256 px) | PNG 134 KB, WebP 11.4 KB (≈12× smaller, ≈2 ms), JPEG 13.5 KB |
 
 The levers behind these numbers (head prefetch, lazy block indexes,
 merged/parallel/multi-range fetches, `cv2.remap` warp, threaded decode, tile
