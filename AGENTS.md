@@ -314,7 +314,7 @@ file — served by a local Range-capable HTTP server that counts bytes. Pinned
 behaviors (do not break):
 
 - center tile PNG; **default tile size 512** (the no-`size` endpoint returns
-  512×512, an on-grid `size=112` still overrides, an off-grid `size` is a 400);
+  512×512, an on-grid `size=144` still overrides, an off-grid `size` is a 400);
   **XYZ convention** (a northern-half red
   square lands in the tile's upper half); **reprojection parity** 4326 vs 3857
   (MSE < 100);
