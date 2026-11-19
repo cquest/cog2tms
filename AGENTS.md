@@ -150,6 +150,10 @@ would oversubscribe across uvicorn workers.
   256 KB range, vs 12 ms if streamed through a queue) — the same callback is the
   byte cap, and the header callback supplies the status of an aborted transfer.
 - **Encoded-tile LRU** (`TILE_CACHE`) + per-key `asyncio.Lock` single-flight.
+- **Head spans from sqlite after a restart** (`HEAD_CACHE`): opening a COG we
+  already met before the process went down costs zero GETs — the 64 KB head
+  zone and the IFD zone near EOF come from disk, pixels/IFDs re-parsed from
+  those bytes; coherence is untouched (the row re-anchors `If-Range`).
 - **Block decode in `_POOL`** (`DECODE_THREADS`, gated by `_PAR_MIN_PX` = 1 Mpx):
   only GIL-free codecs go there (simplejpeg, zlib, imagecodecs LZW and WebP —
   libwebp releases the GIL, ≈0.3–0.9 ms/128² block, only a handful per tile);
@@ -180,6 +184,19 @@ would oversubscribe across uvicorn workers.
   would loop `CogChanged` → 503). Size drift is still checked and the probe
   re-walks the chain. Not caught: in-place replacement behind a stable target
   with identical total size.
+- **Across restarts** (`HEAD_CACHE`, `app/headcache.py`): each `prefetch` span
+  (head zone, IFD zone near EOF) is saved to sqlite **with its validator** —
+  and only when responses carried a change detector (ETag/Last-Modified, direct
+  host). Reopening with no in-memory anchor adopts the span, seeds `_versions`
+  + `_checked` + `_size` from the row: the first single-range read already
+  carries `If-Range`, so a file replaced while the process was down is caught
+  by the very first block fetch (200 → `CogChanged` → `_purge` → rows dropped)
+  — stale head bytes are never mixed with a new file's blocks. An entry that
+  now redirects also raises `CogChanged` before settling (`_cold` guard: the
+  saved spans belonged to the old direct answer). No validator → nothing is
+  ever written. Rows are bounded (4096 most recent, 30-day TTL — a flood of
+  distinct urls cannot grow the disk) and a corrupt/unwritable database is a
+  cache miss, never an outage.
 
 ## Redirects answered by the remote server
 
@@ -207,6 +224,8 @@ cog2tms/
 │   │                      # range merging, bounded retries, negative cache, ETag/If-Range
 │   │                      # version anchors, body caps (header + write callbacks), own 30x
 │   │                      # walking with check_url on every Location
+│   ├── headcache.py       # sqlite persistence of prefetched head spans across restarts
+│   │                      # (only COGs with ETag/Last-Modified; purged on change/move)
 │   ├── tiles.py           # XYZ math, overview pick, warp grid, bilinear sampler
 │   ├── crs.py             # pure-Python CRS math + minimal EPSG table
 │   ├── empty.py           # memoized empty PNG/JPEG/WebP tiles
@@ -222,6 +241,7 @@ cog2tms/
 │   ├── test_multirange.py # multi-range support + per-host fallback learning
 │   ├── test_retries.py    # fault injection: 429/5xx retries, negative cache
 │   ├── test_versions.py   # coherence when the COG is replaced under one URL
+│   ├── test_headcache.py  # sqlite head spans across restarts, validator-gated
 │   ├── test_redirects.py  # own 30x walking + per-hop check_url + target moves
 │   ├── test_codecs.py     # JPEG-in-TIFF fixtures, codec parity, ZSTD/JPEG-XL, threaded decode
 │   ├── test_pixels.py     # 16-bit rescale, nodata (+ SampleFormat signed/float, NaN),
@@ -242,7 +262,9 @@ cog2tms/
 
 Full table with defaults in the README. Gotchas: CORS is `*` on all routes;
 `ALLOW_PRIVATE_NET=1` exists for dev/tests only; `VALIDATE_TTL=-1` disables
-version checks; `MULTIRANGE=0` forces single ranges.
+version checks; `MULTIRANGE=0` forces single ranges; `HEAD_CACHE` is off until
+a sqlite path is set (persisted spans are only ever kept for COGs whose
+responses carry ETag/Last-Modified).
 
 ## Test COG files (remote, marked `network`)
 
@@ -400,6 +422,13 @@ behaviors (do not break):
   `Location` byte-identical to direct; refused hop (host/IP/scheme) never
   contacted; loop + hop limits; one walk per reader; alternating mirror ETags →
   200, never 503; moved entry caught by the probe.
+- **head cache across restarts** (sqlite + versioned in-memory COG): spans
+  saved only with a validator (no ETag → nothing written), reopening adopts
+  them with zero head fetch and anchors `If-Range` from row 1 (pixels
+  identical, served bytes down by the span sizes), a file replaced while down
+  → `CogChanged` on the first block fetch + rows purged + re-save on the new
+  validator, an entry that moved behind a 302 → `CogChanged`, cold spans never
+  mixed and nothing persisted behind the redirect.
 
 ### Integration (`pytest -m network`, excluded by default)
 

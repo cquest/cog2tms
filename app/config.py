@@ -67,3 +67,7 @@ SHARPEN = float(os.getenv("SHARPEN", "0.3"))
 # bulk read of the COG head zone (IFDs, GeoTIFF tags) to avoid many tiny
 # round-trips at open; 0 disables
 HEAD_PREFETCH = int(os.getenv("HEAD_PREFETCH", "65536"))
+
+# sqlite file persisting prefetched head spans across restarts (only for COGs
+# whose responses carry ETag/Last-Modified); empty disables
+HEAD_CACHE = os.getenv("HEAD_CACHE", "")

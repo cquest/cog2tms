@@ -10,7 +10,7 @@ from urllib.parse import urljoin, urlsplit
 from curl_cffi import CurlError, CurlHttpVersion, CurlOpt
 from curl_cffi.requests import Session
 
-from . import __version__, config
+from . import __version__, config, headcache
 from .security import check_url
 
 USER_AGENT = f"cog2tms/{__version__} (https://github.com/cquest/cog2tms)"
@@ -133,6 +133,7 @@ def forget(url: str):
     _versions.pop(url, None)
     _checked.pop(url, None)
     _resolved.pop(url, None)
+    headcache.forget(url)  # ... and what a previous process saved of it
 
 
 def revalidate(url: str):
@@ -349,6 +350,7 @@ class RangeReader:
         self._size = None
         self._multi_ok = bool(config.MULTIRANGE) and _host_multi.get(self._host, True)
         self._bufs: list[tuple[int, bytes]] = []  # (start, blob), newest first
+        self._cold = False  # spans adopted from the on-disk head cache
 
     @property
     def _direct(self) -> bool:
@@ -364,6 +366,12 @@ class RangeReader:
                            method, headers, cap)
         self.proto = r.proto
         if final != self._target:
+            if self._cold and final != self.url:
+                # the adopted spans came from a direct sighting: the entry now
+                # redirects, so those bytes are not from the file this url
+                # points at anymore - never mix cold spans with a new host
+                headcache.forget(self.url)
+                raise CogChanged(f"COG now served from {urlsplit(final).netloc}")
             self._target = final
             self._settled = final != self.url
             self._host = urlsplit(final).netloc
@@ -425,12 +433,30 @@ class RangeReader:
 
     def prefetch(self, offset: int, length: int):
         """Bulk-fetch one span (COG header zone, or the IFD zone near EOF on
-        files whose IFDs sit at the end) and keep it for later reads."""
+        files whose IFDs sit at the end) and keep it for later reads. A span
+        a previous process saved (headcache) is adopted with its validator:
+        _versions gets anchored, so the first real read carries If-Range and a
+        file replaced while we were down is caught like with an in-memory span."""
         if self._size is not None and self._size <= length:
             return  # whole file in one chunk anyway: pointless
-        if not any(s <= offset and offset + length <= s + len(b) for s, b in self._bufs):
-            self._bufs.insert(0, (offset, self._raw(offset, length)))
-            del self._bufs[2:]
+        if any(s <= offset and offset + length <= s + len(b) for s, b in self._bufs):
+            return
+        if config.HEAD_CACHE:
+            anchor = _versions.get(self.url, (None, None))[0]
+            row = headcache.load(self.url, offset)
+            if row and (anchor is None or (self._cold and row[0] == anchor)):
+                if len(row[2]) >= length or offset + len(row[2]) >= row[1]:
+                    self._cold = self._settled = True  # direct, as last seen
+                    self._size, _versions[self.url] = row[1], (row[0], row[1])
+                    _checked[self.url] = time.monotonic()
+                    self._bufs.insert(0, (offset, row[2]))
+                    return
+        self._bufs.insert(0, (offset, self._raw(offset, length)))
+        del self._bufs[2:]
+        if self._direct:  # only a direct sighting carries usable validators
+            v, total = _versions.get(self.url, (None, None))
+            headcache.save(self.url, offset, v, total or self._size or 0,
+                           self._bufs[0][1])
 
     def _from_buf(self, offset: int, length: int) -> bytes | None:
         for start, blob in self._bufs:

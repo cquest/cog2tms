@@ -105,6 +105,7 @@ LRU with single-flight locks): [AGENTS.md](AGENTS.md).
 | `MERGE_GAP` | `4096` | byte-ranges closer than this share one HTTP request |
 | `MULTIRANGE` | `1` | several ranges per GET (multipart/byteranges); rejection remembered per host |
 | `HEAD_PREFETCH` | `65536` | bulk head read (bytes) absorbing IFD/tag parsing at open (`0` disables) |
+| `HEAD_CACHE` | — | sqlite file persisting those head spans across restarts (COGs with ETag/Last-Modified only, rows bounded 4096 + 30-day TTL); empty disables |
 | `HTTP_CONNECT_TIMEOUT` / `HTTP_READ_TIMEOUT` | `10` / `30` | upstream timeouts (s) |
 | `HTTP_RETRIES` / `HTTP_BACKOFF` | `2` / `0.3` | transparent retries on 429/5xx (`0` disables) |
 | `HTTP2` | `1` | HTTP/2 to hosts offering it (ALPN); `0` pins HTTP/1.1 |
@@ -125,13 +126,20 @@ LRU with single-flight locks): [AGENTS.md](AGENTS.md).
   404/403 remembered; cached tiles keep being served while upstream is down.
 - **Coherence**: each COG's `ETag`/`Last-Modified`/size is anchored and later
   requests carry `If-Range`; any drift drops the reader and its cached tiles —
-  a replacement's whole-file 200 answer is never downloaded.
+  a replacement's whole-file 200 answer is never downloaded. With
+  `HEAD_CACHE` set, head spans survive a restart only for COGs whose
+  responses carry such a validator: reopening re-anchors `If-Range` from the
+  stored validator, so a file replaced while the service was down is caught
+  by the very first block read (and the stale rows purged).
 
 ## Docker
 
 ```bash
 docker build -t cog2tms .
 docker run -p 3857:3857 cog2tms   # http://localhost:3857
+# head spans kept in a volume across restarts (COGs with ETag/Last-Modified):
+docker run -p 3857:3857 -v cog2tms-cache:/var/cache/cog2tms \
+  -e HEAD_CACHE=/var/cache/cog2tms/heads.sqlite3 cog2tms
 ```
 
 Design notes, supported-CRS list and roadmap: [AGENTS.md](AGENTS.md).

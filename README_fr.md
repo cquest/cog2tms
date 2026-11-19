@@ -108,6 +108,7 @@ décodage threadé, LRU de tuiles avec verrous single-flight) :
 | `MERGE_GAP` | `4096` | deux gammes plus proches que cela partagent une requête HTTP |
 | `MULTIRANGE` | `1` | plusieurs gammes par GET (multipart/byteranges) ; le refus est mémorisé par hôte |
 | `HEAD_PREFETCH` | `65536` | lecture en bloc de l'en-tête (octets) absorbant l'analyse IFD/balises à l'ouverture (`0` désactive) |
+| `HEAD_CACHE` | — | fichier sqlite conservant ces plages d'en-tête après un redémarrage (COG avec ETag/Last-Modified uniquement, lignes bornées 4096 + TTL 30 j) ; vide désactive |
 | `HTTP_CONNECT_TIMEOUT` / `HTTP_READ_TIMEOUT` | `10` / `30` | délais d'attente amont (s) |
 | `HTTP_RETRIES` / `HTTP_BACKOFF` | `2` / `0,3` | retries transparents sur 429/5xx (`0` désactive) |
 | `HTTP2` | `1` | HTTP/2 vers les hôtes qui le proposent (ALPN) ; `0` épingle HTTP/1.1 |
@@ -130,13 +131,20 @@ décodage threadé, LRU de tuiles avec verrous single-flight) :
 - **Cohérence** : l'`ETag`/`Last-Modified`/taille de chaque COG est ancré et les
   requêtes suivantes portent `If-Range` ; toute dérive fait tomber le lecteur
   et ses tuiles en cache — la réponse 200 fichier entier d'un remplacement n'est
-  jamais téléchargée.
+  jamais téléchargée. Avec `HEAD_CACHE`, les plages d'en-tête survivent à un
+  redémarrage uniquement pour les COG dont les réponses portent un tel
+  validateur : la réouverture ré-ancre `If-Range` depuis le validateur stocké,
+  un fichier remplacé pendant l'arrêt est donc détecté dès la première lecture
+  de bloc (et les lignes périmées purgées).
 
 ## Docker
 
 ```bash
 docker build -t cog2tms .
 docker run -p 3857:3857 cog2tms   # http://localhost:3857
+# plages d'en-tête conservées dans un volume après redémarrage (COG avec ETag/Last-Modified) :
+docker run -p 3857:3857 -v cog2tms-cache:/var/cache/cog2tms \
+  -e HEAD_CACHE=/var/cache/cog2tms/heads.sqlite3 cog2tms
 ```
 
 ## Licence
