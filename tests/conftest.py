@@ -36,7 +36,7 @@ BBOX4326 = (2.30, 48.83, 2.36, 48.88)  # w,s,e,n
 RWEB = 6378137.0
 
 # CH1903+ test box (near Bern): an EPSG:2056 COG, outside the CRS table and
-# rendered only through the PROJ fallback (pyproj, extra "crs"). Chosen so the
+# rendered only through the PROJ fallback (pyproj). Chosen so the
 # whole footprint sits inside the z14 centre tile of swiss_tile() (the x+1 tile
 # boundary is at lon 7.4487).
 SWISS = (7.4300, 46.9500, 7.4450, 46.9600)  # w,s,e,n
@@ -662,7 +662,7 @@ COGJXL2 = "cogjxl2.tif"  # 2-sample (gray+alpha) JPEG XL: refused at open
 COGSUB = "cogsub.tif"  # overviews via SubIFDs (tag 330), empty IFD chain
 COGHOLE = "coghole.tif"  # east block column: count 0 = no-data merger holes
 COGBADCRS = "cogbadcrs.tif"  # geographic EPSG:42304 -> refused
-COG2056 = "cog2056.tif"  # CH1903+/LV95: PROJ fallback (extra "crs")
+COG2056 = "cog2056.tif"  # CH1903+/LV95: PROJ fallback
 COGSWISS3857 = "cogswiss3857.tif"  # same box in EPSG:3857: parity twin of COG2056
 COGNDNEG = "cogndneg.tif"  # GDAL_NODATA=-9999 on unsigned 8-bit: matches nothing
 COGI8 = "cogi8.tif"  # SampleFormat 2 with bps 8: signed bytes

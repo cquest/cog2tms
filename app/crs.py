@@ -187,7 +187,7 @@ _LCC_EPSG = {
 _LINEAR_UNITS = {9001: 1.0, 9002: 1200 / 3937, 9003: 0.3048, 9036: 0.304800609601}
 
 
-# --- optional PROJ fallback (pyproj, extra "crs") --------------------------
+# --- optional PROJ fallback (pyproj) ----------------------------------------
 # The table above stays what the service guarantees deterministically forever.
 # When it misses, and only then, a pyproj Transformer speaks for PROJ's whole
 # EPSG database: any projected or geographic CRS, datum shifts included (that
@@ -249,7 +249,7 @@ def _proj_fallback(code):
 def crs_from_geokeys(key: dict) -> CRS:
     """Build a CRS from a parsed GeoKeyDirectory (1024 ModelType, 2048 geographic,
     3072 projected CS code). Supports a small EPSG subset in-table, then defers
-    to PROJ when pyproj is installed (extra "crs"); anything else raises."""
+    to PROJ when pyproj is installed ; anything else raises."""
     if key.get(1024, 1) == 2:  # geographic
         geo = key.get(2048, 4326)
         if geo in GEO_WGS_LIKE:

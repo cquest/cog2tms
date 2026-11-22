@@ -258,7 +258,7 @@ def test_reprojection_parity(client, server):
     assert mse < 100, mse
 
 
-@pytest.mark.skipif(_pyproj is None, reason="PROJ fallback is the extra 'crs'")
+@pytest.mark.skipif(_pyproj is None, reason="PROJ fallback")
 def test_epsg2056_proj_fallback(client, server):
     """A COG whose CRS is outside the table renders through PROJ (CH1903+/
     LV95): coverage where the footprint is, empty next door, and the metadata
@@ -274,7 +274,7 @@ def test_epsg2056_proj_fallback(client, server):
     assert g["properties"]["crs"] == "EPSG:2056"
 
 
-@pytest.mark.skipif(_pyproj is None, reason="PROJ fallback is the extra 'crs'")
+@pytest.mark.skipif(_pyproj is None, reason="PROJ fallback")
 def test_epsg2056_datum_parity(client, server):
     """The same Swiss box as an EPSG:2056 grid and as an EPSG:3857 grid must
     land on the same pixels: forgetting the CH1903+ shift moves it by ~270 m,

@@ -32,7 +32,7 @@ GOLDEN = [
         (2.35, 48.855, 261600.80336419, 6250293.64590400),
         (-71.0667, -45.0, -7911108.85635833, -5621521.48619207)]),
     ({3072: 2056}, "EPSG:2056", [  # CH1903+/LV95: not in the table - this is
-        # the PROJ fallback (extra "crs"); cs2cs here is the very PROJ that
+        # the PROJ fallback ; cs2cs here is the very PROJ that
         # pyproj embeds (both 9.9), values full precision: PROJ's oblique
         # Mercator inverse is iterative (round trip ~0.04 mas), so each pair
         # is the exact inverse of its x/y, embedded as cs2cs prints them
