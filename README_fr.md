@@ -39,8 +39,8 @@ GET /openapi.json   GET /docs   GET /redoc       # schéma OpenAPI 3.1 + docs (s
   masque) passent en non-couverture ; défaut `20`, `-1` désactive.
 - transparence sur NODATA
 - **SIG** : 4326, 3857, Lambert-93, CC42–48, UTM, LCC/UTM définis par
-  l'utilisateur — pur Python et déterministes. Les autres codes EPSG ne sont
-  servis qu'avec le repli PROJ.
+  l'utilisateur — pur Python et déterministes. Les autres codes EPSG sont
+  servis par le repli PROJ (pyproj, une dépendance régulière).
 - Erreurs : `400` zoom / indice / format / taille / URL, données signées, 32
   bits ou flottantes sans `rescale`, SIG non pris en charge, chaîne de
   redirections refusée ; `404` COG injoignable, pas un GeoTIFF ou format

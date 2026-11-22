@@ -112,7 +112,7 @@ pytest-cov, httpx.
   projection keys (3075 = CT 1/8/9/27, both GDAL and ESRI key spellings):
   Snyder series, forward and inverse; < 1 cm and < 1 mm vs PROJ golden values
   (the inverse matches PROJ `+approx`, same series family, to ≤ 0.05 mas);
-  anything else → **optional** PROJ fallback first, else 400. The fallback
+  anything else → PROJ fallback first, else 400. The fallback
   (`_proj_fallback`) speaks for PROJ's whole EPSG registry
   — projected and geographic codes, datum shifts included (EPSG:2056 is its
   case: CH1903+ oblique Mercator, ~1 m off if approximated as LCC). The table
