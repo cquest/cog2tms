@@ -95,6 +95,7 @@ def test_web_ui(client):
     r = client.get("/")
     assert r.status_code == 200 and r.headers["content-type"] == "text/html; charset=utf-8"
     assert b"maplibre" in r.content and b"cog2tms" in r.content
+    assert b"https://github.com/cquest/cog2tms" in r.content  # footer repo link
     for asset in ("/static/maplibre-gl.js", "/static/maplibre-gl.css", "/static/maplibre_app.js",
                   "/static/josm.svg"):
         assert client.get(asset).status_code == 200
