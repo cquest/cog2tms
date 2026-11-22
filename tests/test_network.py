@@ -233,7 +233,8 @@ def test_http2_parity(client, monkeypatch):
     def render():
         pool.clear()
         clear_caches()
-        for d in (httprange._versions, httprange._checked, httprange._host_multi):
+        for d in (httprange._versions, httprange._lastmod, httprange._checked,
+                  httprange._host_multi):
             d.clear()
         tile = _t(client, path)
         assert tile.status_code == 200

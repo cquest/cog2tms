@@ -615,6 +615,7 @@ def counter(server):
     clear_caches()  # drop encoded-tile cache so bytes are really served
     hr._negative.clear()  # a previous 404 must not short-circuit this test
     hr._versions.clear()  # ... nor a stale version anchor
+    hr._lastmod.clear()
     hr._checked.clear()
     hr._resolved.clear()  # ... nor a stale redirect target
     server.reset()

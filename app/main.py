@@ -16,9 +16,9 @@ from . import __version__ as version
 from .cogpool import ReaderPool
 from .crs import UnsupportedCRS
 from .empty import empty_tile
-from .geotiff import CogError
-from .httprange import (CogChanged, CogFetch, CogNotFound, CogRedirect, forget,
-                        revalidate)
+from .geotiff import CogError, compression_name
+from .httprange import (CogChanged, CogFetch, CogNotFound, CogRedirect,
+                        forget, last_modified, revalidate)
 from .security import check_url
 from .tiles import EmptyTile, MissingRescale, web_bbox_lonlat
 
@@ -372,12 +372,19 @@ def _encode(rgb: np.ndarray, valid: np.ndarray, fmt: str, quality: int) -> bytes
                                          "where the COG holds its native resolution",
                           "content": {"application/json": {}}}, **_ERRORS})
 async def tilejson(u: str = Query(..., description="COG url (http/https)")):
-    """Returns the TileJSON describing the remote trnaformed COG."""
+    """Returns the TileJSON describing the remote transformed COG."""
     cog = await _open(u)
     bbox = web_bbox_lonlat(cog.web_bbox())
     gsd = cog.psx * cog.unit_m
     coarse_gsd = gsd * cog.levels[0].width / cog.levels[-1].width
     res0 = 2 * math.pi * crs.R_WEB / 256.0
+    # provenance of the source file, free of charge: every value here is what
+    # opening the COG already learned (no extra upstream byte)
+    info = {"size": cog.reader.size(),
+            "compression": compression_name(cog.levels[0].compression)}
+    lm = last_modified(u)  # direct sightings only: behind a redirect nothing is anchored
+    if lm:
+        info["last_modified"] = lm
     return JSONResponse({
         "tilejson": "2.2.0", "name": "cog2tms", "scheme": "xyz",
         # minzoom/maxzoom are computed on a 256 px grid: pin the size so the
@@ -386,6 +393,7 @@ async def tilejson(u: str = Query(..., description="COG url (http/https)")):
         "bbox": [round(v, 6) for v in bbox],
         "minzoom": max(0, min(config.MAX_ZOOM, math.floor(math.log2(res0 / max(coarse_gsd, 1e-9))))),
         "maxzoom": max(0, min(config.MAX_ZOOM, math.ceil(math.log2(res0 / gsd)))),
+        "cog": info,
     })
 
 

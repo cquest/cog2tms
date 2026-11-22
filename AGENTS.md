@@ -17,7 +17,10 @@ GET /c2t/{z}/{x}/{y}?u=<cog url>         tile: format=png|jpeg|webp|auto, qualit
                                          bidx, rescale, blackmax
 GET /c2t/{z}/{x}/{y}.geojson?u=…         COG footprint ring (debug)
 GET /c2t.tms.json?u=…                    TileJSON (bbox, minzoom/maxzoom; the tile
-                                         template pins size=256 to match its zoom math)
+                                         template pins size=256 to match its zoom
+                                         math; plus a "cog" provenance block —
+                                         codec name, whole size, Last-Modified —
+                                         all already known from the open)
 GET /healthz
 GET /robots.txt                          "User-agent: * Disallow: /c2t" + X-Robots-Tag
                                          (nofollow, noimageindex) on every response
@@ -54,7 +57,7 @@ raster, unreadable samples), `502` (upstream error).
 
 | Topic | Decision |
 |---|---|
-| Engine | Pure-Python COG reader over **curl_cffi** byte-range (libcurl: HTTP/1.1 and HTTP/2 by ALPN, `HTTP2=0` pins 1.1; bodies bounded by a write callback); images with Pillow+numpy; JPEG-in-TIFF blocks decoded by **simplejpeg** (identical pixels, releases the GIL) with a Pillow fallback; warp/resample by **`cv2.remap`** (opencv-python-headless — the one heavy wheel, accepted for the render win). Small surface, prebuilt wheels only, full control of what is fetched — exception accepted: **pyproj**: the PROJ fallback for EPSG codes outside the pure-Python table; base install and Docker image never pull it, the table always takes precedence. |
+| Engine | Pure-Python COG reader over **curl_cffi** byte-range (libcurl: HTTP/1.1 and HTTP/2 by ALPN, `HTTP2=0` pins 1.1; bodies bounded by a write callback); images with Pillow+numpy; JPEG-in-TIFF blocks decoded by **simplejpeg** (identical pixels, releases the GIL) with a Pillow fallback; warp/resample by **`cv2.remap`** (opencv-python-headless — the one heavy wheel, accepted for the render win). Small surface, prebuilt wheels only, full control of what is fetched — exception accepted: **pyproj**, regular dependency — the PROJ fallback for EPSG codes outside the pure-Python table; the table always takes precedence. |
 | Y orientation | **OSM-style XYZ** (Y points down). Pass-through, no flip. A unit test pins the convention. |
 | Out-of-bounds tiles | **200 + empty tile**: fully transparent PNG/WebP (alpha=0); JPEG has no alpha → solid fill, configurable `EMPTY_TILE_BG` (default `0,0,0`). |
 | Output formats | **PNG, JPEG, WebP** + `format=auto` = the `Accept` header only: webp iff `image/webp` (q>0) is listed explicitly, else png; the source codec (JPEG-in-TIFF) plays **no** role. **Wildcards (`image/*`, `*/*`) never select webp** — JOSM and plain clients send them and cannot decode it. WebP = Pillow `exact=True` (without it, RGB is blended to a background where alpha<255) + `method=0`; `WEBP_LOSSLESS=1` → lossless+exact = bit-identical to PNG. The resolved format is part of the tile-cache key. PNG stays the default when `format` is omitted. |
@@ -229,7 +232,8 @@ cog2tms/
 │   ├── geotiff.py         # TIFF/BigTIFF parser, decoders (simplejpeg, imagecodecs, pure-Python/Pillow fallbacks), window reader
 │   ├── httprange.py       # RangeReader (curl_cffi, thread-local handles) / LocalReader,
 │   │                      # range merging, bounded retries, negative cache, ETag/If-Range
-│   │                      # version anchors, body caps (header + write callbacks), own 30x
+│   │                      # version anchors + raw Last-Modified kept apart (TileJSON
+│   │                      # display), body caps (header + write callbacks), own 30x
 │   │                      # walking with check_url on every Location
 │   ├── headcache.py       # sqlite persistence of prefetched head spans across restarts
 │   │                      # (only COGs with ETag/Last-Modified; purged on change/move)
@@ -340,7 +344,10 @@ behaviors (do not break):
   resolved format;
 - 400 paths (zoom, x/y, format, scheme, bidx, rescale, blackmax), 404 missing
   COG / non-TIFF / rotated raster / unreadable samples, `size`/`bidx`,
-  TileJSON/GeoJSON/healthz; the same open-error matrix on `.geojson` and
+  TileJSON/GeoJSON/healthz — TileJSON carries the `cog` block (codec name from tag
+  259, whole size, `last_modified` **omitted** when the host sends no validator;
+  the versioned test server proves the Last-Modified is kept apart from the ETag
+  and re-anchored after a purge+reopen); the same open-error matrix on `.geojson` and
   `.tms.json`; web UI (`GET /` = map preview page + vendored assets, the dropped
   `/maplibre` route answers 404);
 - **HEAD = GET without the body** on every route (`/healthz`, `robots.txt`,
@@ -485,7 +492,7 @@ pixels rendered behind a mandatory `rescale`, then the GDAL JPEG layout (IFD tag
 347) covered by offline fixtures — its splice pinned bit-identical to
 self-contained blocks, and an undecodable block is a 404 instead of a 500, then
 JPEG XL decode (codec 50002, DNG 1.7's 52546) through imagecodecs/libjxl, then
-the  PROJ fallback: the pure-Python table always
+the PROJ fallback: the pure-Python table always
 wins, out-of-table EPSG codes (first case 2056, CH1903+ — the hand-written
 approximation was measured up to 1 m off) render through PROJ, absent wheel
 keeps the 400.

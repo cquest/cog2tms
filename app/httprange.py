@@ -60,6 +60,11 @@ def _neg_mark(url: str, status: int):
 # from ETag/Last-Modified and Content-Range of the responses we already had
 _versions: dict[str, tuple[str | None, int | None]] = {}
 
+# url -> raw Last-Modified header: the validator above keeps the ETag when both
+# are present, so the displayable date is remembered apart (TileJSON only, it
+# never takes part in coherence)
+_lastmod: dict[str, str] = {}
+
 # url -> monotonic time of last version look (bounds revalidation probes)
 _checked: dict[str, float] = {}
 
@@ -109,6 +114,9 @@ def _validator(r) -> str | None:
 def _note_version(url: str, r):
     """Remember the version carried by a response; drift since the last one we
     saw means the file was replaced under the same URL."""
+    lm = r.headers.get("Last-Modified")
+    if lm:
+        _lastmod[url] = lm  # for display: the validator may well keep the ETag
     v = _validator(r)
     if v is None:
         return
@@ -133,7 +141,15 @@ def forget(url: str):
     _versions.pop(url, None)
     _checked.pop(url, None)
     _resolved.pop(url, None)
+    _lastmod.pop(url, None)
     headcache.forget(url)  # ... and what a previous process saved of it
+
+
+def last_modified(url: str) -> str | None:
+    """Raw Last-Modified of a directly sighted file (None when the host sends
+    none or answers through a redirect; after a restart it comes back with the
+    first response carrying one)."""
+    return _lastmod.get(url)
 
 
 def revalidate(url: str):

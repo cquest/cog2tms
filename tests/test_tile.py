@@ -7,8 +7,9 @@ import pytest
 from PIL import Image
 
 from .conftest import (BBOX4326, COG12, COG2056, COG3857, COG4326, COGBADCRS, COGCX,
-                       COGFP2, COGNDJUNK, COGNDNEG, COGPRED3, COGROT, COGSWISS3857,
-                       COGWEBP1, _pyproj, _web, fixture_tile, swiss_tile, tile_url)
+                       COGFP2, COGJPEG, COGNDJUNK, COGNDNEG, COGPRED3, COGROT,
+                       COGSWISS3857, COGWEBP1, _pyproj, _web, fixture_tile,
+                       swiss_tile, tile_url)
 
 
 def test_healthz(client):
@@ -289,13 +290,20 @@ def test_epsg2056_datum_parity(client, server):
     assert mse < 100, mse
 
 
-def test_tms_json(client, server):
+def test_tms_json(client, server, fixtures_dir):
     r = client.get(f"/c2t.tms.json?u={server.base}/{COG4326}")
     assert r.status_code == 200
     tj = r.json()
     assert tj["scheme"] == "xyz" and tj["minzoom"] <= tj["maxzoom"]
     w, s, e, n = BBOX4326
     assert abs(tj["bbox"][0] - w) < 0.01 and abs(tj["bbox"][2] - e) < 0.01
+    # source provenance: assembled from what the open already knows
+    info = tj["cog"]
+    assert info["compression"] == "deflate"
+    assert info["size"] == (fixtures_dir / COG4326).stat().st_size
+    assert "last_modified" not in info  # fixture server sends no validator
+    jpeg = client.get(f"/c2t.tms.json?u={server.base}/{COGJPEG}").json()["cog"]
+    assert jpeg["compression"] == "jpeg"  # old-style JPEG-in-TIFF (code 7)
 
 
 def test_geojson(client, server):

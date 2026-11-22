@@ -19,7 +19,8 @@ GET /                                       # interface web : aperçu MapLibre (
 GET /c2t/{z}/{x}/{y}?u=<url du COG>[&format=png|jpeg|webp|auto][&quality=80][&size=512]
                       [&bidx=1,2,3][&rescale=min,max][&blackmax=0]
 GET /c2t/{z}/{x}/{y}.geojson?u=<url du COG> # empreinte du COG (debug)
-GET /c2t.tms.json?u=<url du COG>            # TileJSON (bbox, minzoom/maxzoom)
+GET /c2t.tms.json?u=<url du COG>            # TileJSON (bbox, minzoom/maxzoom + bloc "cog" :
+                                           # codec, taille, Last-Modified du COG)
 GET /healthz   GET /robots.txt   GET /static/…   # santé, politique robots, ressources de l'interface
 GET /openapi.json   GET /docs   GET /redoc       # schéma OpenAPI 3.1 + docs (swagger-ui via CDN)
 # toute route ci-dessus répond aussi à HEAD : mêmes en-têtes, pas de corps

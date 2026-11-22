@@ -19,6 +19,7 @@ class _Versioned(http.server.BaseHTTPRequestHandler):
     server that ignores If-Range, or one answering a huge whole-file 200."""
     blob = b""
     etag = '"v1"'
+    lastmod = "Wed, 01 Jan 2025 00:00:00 GMT"
     honor_if_range = True
     big_200 = False
     fail_probe = False
@@ -33,6 +34,7 @@ class _Versioned(http.server.BaseHTTPRequestHandler):
         type(self).status.append(status)
         self.send_response(status)
         self.send_header("ETag", type(self).etag)
+        self.send_header("Last-Modified", type(self).lastmod)
         for k, v in extra:
             self.send_header(k, v)
         self.send_header("Content-Length", str(len(body)))
@@ -89,12 +91,14 @@ def _clean_state():
     from app.main import clear_caches, pool
     pool.clear()
     clear_caches()
-    for d in (hr._negative, hr._versions, hr._checked, hr._host_multi, hr._resolved):
+    for d in (hr._negative, hr._versions, hr._lastmod, hr._checked,
+              hr._host_multi, hr._resolved):
         d.clear()
     yield
     pool.clear()
     clear_caches()
-    for d in (hr._negative, hr._versions, hr._checked, hr._host_multi, hr._resolved):
+    for d in (hr._negative, hr._versions, hr._lastmod, hr._checked,
+              hr._host_multi, hr._resolved):
         d.clear()
 
 
@@ -181,6 +185,30 @@ def test_cached_tile_purged_when_file_replaced(tmp_path, monkeypatch):
     finally:
         _down(srv)
         _down(srv2)
+
+
+def test_tilejson_cog_info(tmp_path, monkeypatch):
+    """TileJSON's `cog` block: codec, whole size and the server's Last-Modified
+    — kept apart from the ETag validator, and re-anchored when a change purges."""
+    from app.main import app
+    monkeypatch.setattr(config, "VALIDATE_TTL", 0.0)  # probe before each tile
+    srv, h, url = _serve(_cog(tmp_path, "t.tif"))
+    try:
+        z, x, y = fixture_tile()
+        with TestClient(app) as c:
+            info = c.get(f"/c2t.tms.json?u={url}").json()["cog"]
+            assert info["compression"] == "deflate"  # fixture codec
+            assert info["size"] == len(h.blob)
+            assert info["last_modified"] == _Versioned.lastmod
+            assert hr._versions[url][0] == '"v1"'  # the validator itself kept the ETag
+            h.blob, h.etag = _cog(tmp_path, "t2.tif", (BBOX4326[0] + 0.01, *BBOX4326[1:])), '"v2"'
+            h.lastmod = "Thu, 02 Jan 2025 00:00:00 GMT"
+            c.get(f"/c2t/{z}/{x}/{y}?u={url}")  # probe: If-Range mismatch -> purge + reopen
+            info = c.get(f"/c2t.tms.json?u={url}").json()["cog"]
+            assert info["last_modified"] == "Thu, 02 Jan 2025 00:00:00 GMT"
+            assert info["size"] == len(h.blob)
+    finally:
+        _down(srv)
 
 
 def test_mid_render_change_reopens_cog(tmp_path, monkeypatch):

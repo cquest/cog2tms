@@ -19,7 +19,8 @@ GET /                                       # web UI: MapLibre preview (vector b
 GET /c2t/{z}/{x}/{y}?u=<COG url>[&format=png|jpeg|webp|auto][&quality=80][&size=512]
                       [&bidx=1,2,3][&rescale=min,max][&blackmax=0]
 GET /c2t/{z}/{x}/{y}.geojson?u=<COG url>   # COG footprint (debug)
-GET /c2t.tms.json?u=<COG url>              # TileJSON (bbox, minzoom/maxzoom)
+GET /c2t.tms.json?u=<COG url>              # TileJSON (bbox, minzoom/maxzoom + "cog"
+                                           # block: codec, size, Last-Modified of the COG)
 GET /healthz   GET /robots.txt   GET /static/…   # health, robots policy, UI assets
 GET /openapi.json   GET /docs   GET /redoc       # OpenAPI 3.1 + docs (swagger-ui from a CDN)
 # every route above also answers HEAD: same headers, no body

@@ -53,6 +53,16 @@ _JXL, _JXL_DNG = 50002, 52546  # JPEG XL (GDAL/libtiff id; DNG 1.7 spells the sa
 # codestream 52546): each block is one standalone bare JXL codestream
 _GEOKEYS, _GEODOUBLE, _JPEGTABLES, _GDAL_NODATA = 34735, 34736, 347, 42113
 
+# human-readable codec names for the TileJSON info block (TIFF tag 259): the
+# duplicate spellings fold together, an unknown code reports its number as is
+_COMP_NAME = {1: "none", 5: "lzw", 6: "jpeg", 7: "jpeg", 8: "deflate",
+              32946: "deflate", 32773: "packbits", 50000: "zstd",
+              50001: "webp", 50002: "jpegxl", 52546: "jpegxl"}
+
+
+def compression_name(code: int) -> str:
+    return _COMP_NAME.get(code, str(code))
+
 # (BitsPerSample, SampleFormat) -> numpy dtype code: signed and float rasters
 # (DEMs, model grids) are real COGs, and guessing 8-bit for bps 12 would render
 # wrong pixels instead of refusing. Refused: SampleFormat 4 (complex), 5 (B int)

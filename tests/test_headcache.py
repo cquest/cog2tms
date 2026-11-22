@@ -99,8 +99,8 @@ def _restart():
     from app.main import clear_caches, pool
     pool.clear()
     clear_caches()
-    for d in (hr._negative, hr._versions, hr._checked, hr._host_multi,
-              hr._resolved):
+    for d in (hr._negative, hr._versions, hr._lastmod, hr._checked,
+              hr._host_multi, hr._resolved):
         d.clear()
 
 
