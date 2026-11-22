@@ -36,6 +36,9 @@ GET /openapi.json   GET /docs   GET /redoc       # OpenAPI 3.1 + docs (swagger-u
 - `blackmax=0..255`: near-black pixels (unmasked orthophoto fringes) become
   no-coverage; default `20`, `-1` disables.
 - NODATA becomes transparency
+- **CRS**: 4326, 3857, Lambert-93, CC42–48, UTM, user-defined LCC/TM —
+  pure-Python and deterministic.
+  PROJ's (national grids not shipped). Without it, and for unknown codes, `400`.
 - Errors: `400` zoom / index / format / size / URL, signed/32-bit/float data
   without `rescale`, unsupported CRS, refused redirect chain; `404` COG
   unreachable, not a GeoTIFF, unusable sample format; `502` upstream error.
@@ -141,9 +144,6 @@ docker run -p 3857:3857 cog2tms   # http://localhost:3857
 docker run -p 3857:3857 -v cog2tms-cache:/var/cache/cog2tms \
   -e HEAD_CACHE=/var/cache/cog2tms/heads.sqlite3 cog2tms
 ```
-
-Design notes, supported-CRS list and roadmap: [AGENTS.md](AGENTS.md).
-
 ## License
 
 WTFPL v2 — see [LICENSE](LICENSE). Vendored third-party files keep their own

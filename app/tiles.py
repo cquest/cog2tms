@@ -142,16 +142,22 @@ def _sharpen(rgb, valid):
 
 def _warp_grid(cog, tx0, ty0, tx1, ty1, size, scale, wc0, wr0):
     """Per-pixel source (col, row) via bilinear on a _K x _K control grid."""
-    C = np.empty((_K, _K))
-    R = np.empty((_K, _K))
+    lons, lats = [], []
     for iv in range(_K):
         Y = ty1 + (ty0 - ty1) * (iv * (size - 1) / (_K - 1) + 0.5) / size
         for iu in range(_K):
             X = tx0 + (tx1 - tx0) * (iu * (size - 1) / (_K - 1) + 0.5) / size
             lon, lat = crs.WEBMERCATOR.to_lonlat(X, Y)
-            sx, sy = cog.crs.to_xy(lon, lat)
-            C[iv, iu] = (sx - cog.ox) / (cog.psx * scale) - wc0 - 0.5
-            R[iv, iu] = (cog.oy - sy) / (cog.psy * scale) - wr0 - 0.5
+            lons.append(lon)
+            lats.append(lat)
+    batch = getattr(cog.crs, "to_xy_many", None)  # PROJ loops in C for the grid
+    if batch is None:
+        sx, sy = zip(*(cog.crs.to_xy(lo, la) for lo, la in zip(lons, lats)))
+    else:
+        sx, sy = batch(lons, lats)
+    # reshape matches the loop's row-major order, bit for bit
+    C = ((np.asarray(sx) - cog.ox) / (cog.psx * scale) - wc0 - 0.5).reshape(_K, _K)
+    R = ((cog.oy - np.asarray(sy)) / (cog.psy * scale) - wr0 - 0.5).reshape(_K, _K)
 
     p = np.linspace(0, _K - 1, size)
     i0 = np.clip(np.floor(p).astype(np.intp), 0, _K - 2)

@@ -13,10 +13,11 @@ dependencies = [
     "simplejpeg>=1.6",
     "imagecodecs>=2024.1",
     "opencv-python-headless>=4.12",
+    "pyproj>=3.1", # PROJ fallback for EPSG codes
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "httpx"]
+dev = ["pytest", "pytest-cov", "httpx", "pyproj"]
 
 [tool.pytest.ini_options]
 addopts = "-m 'not network'"

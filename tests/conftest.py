@@ -18,6 +18,11 @@ try:  # only used to write the ZSTD fixture
 except ImportError:
     _ic = None
 
+try:  # only used to place the EPSG:2056 fixture (PROJ fallback tests)
+    import pyproj as _pyproj
+except ImportError:
+    _pyproj = None
+
 os.environ["ALLOW_PRIVATE_NET"] = "1"  # fixture server is on loopback
 
 W = H = 512
@@ -29,6 +34,24 @@ TBL_JPEGTM, TBL_EOI, TBL_NONE = b"\xff\x7f", b"\xff\xd9", b""
 # fixture footprint (near Paris) in lon/lat and its EPSG:3857 box
 BBOX4326 = (2.30, 48.83, 2.36, 48.88)  # w,s,e,n
 RWEB = 6378137.0
+
+# CH1903+ test box (near Bern): an EPSG:2056 COG, outside the CRS table and
+# rendered only through the PROJ fallback (pyproj, extra "crs"). Chosen so the
+# whole footprint sits inside the z14 centre tile of swiss_tile() (the x+1 tile
+# boundary is at lon 7.4487).
+SWISS = (7.4300, 46.9500, 7.4450, 46.9600)  # w,s,e,n
+
+
+def _swiss_grid():
+    """(xmin, ymin, xmax, ymax) in EPSG:2056 m of the SWISS box, projected
+    through PROJ - the grid of the cog2056.tif fixture."""
+    tf = _pyproj.Transformer.from_crs("EPSG:4326", "EPSG:2056", always_xy=True)
+    pts = [tf.transform(lo, la) for lo, la in ((SWISS[0], SWISS[1]),
+                                               (SWISS[0], SWISS[3]),
+                                               (SWISS[2], SWISS[1]),
+                                               (SWISS[2], SWISS[3]))]
+    xs, ys = zip(*pts)
+    return min(xs), min(ys), max(xs), max(ys)
 
 
 def _web(x, y):  # lon/lat deg -> EPSG:3857 m
@@ -478,6 +501,18 @@ def fixtures_dir(tmp_path_factory):
     x0, y1 = _web(w0, n0)
     x1, y0 = _web(e0, s0)
     write_cog(d / "cog3857.tif", x0, y1, (x1 - x0) / W, (y1 - y0) / H, geographic=False)
+    if _pyproj:  # CH1903+/LV95 grid, plus the 3857 twin of the same box:
+        # rendering both must match - a missing CH1903+ datum shift (270 m)
+        # would put the 2056 tile 40 px away at this zoom
+        gx0, gy0, gx1, gy1 = _swiss_grid()
+        write_cog(d / "cog2056.tif", gx0, gy1, (gx1 - gx0) / W, (gy1 - gy0) / H,
+                  geographic=False,
+                  geokeys=[1, 1, 0, 5, 1024, 0, 1, 1, 2048, 0, 1, 4150, 2052, 0,
+                           1, 9001, 3072, 0, 1, 2056, 3076, 0, 1, 9001])
+        x0, y1 = _web(SWISS[0], SWISS[3])
+        x1, y0 = _web(SWISS[2], SWISS[1])
+        write_cog(d / "cogswiss3857.tif", x0, y1, (x1 - x0) / W, (y1 - y0) / H,
+                  geographic=False)
     write_cog(d / "cogjpeg.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
               geographic=True, comp=7)
     write_cog(d / "cogjpeg1.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
@@ -627,6 +662,8 @@ COGJXL2 = "cogjxl2.tif"  # 2-sample (gray+alpha) JPEG XL: refused at open
 COGSUB = "cogsub.tif"  # overviews via SubIFDs (tag 330), empty IFD chain
 COGHOLE = "coghole.tif"  # east block column: count 0 = no-data merger holes
 COGBADCRS = "cogbadcrs.tif"  # geographic EPSG:42304 -> refused
+COG2056 = "cog2056.tif"  # CH1903+/LV95: PROJ fallback (extra "crs")
+COGSWISS3857 = "cogswiss3857.tif"  # same box in EPSG:3857: parity twin of COG2056
 COGNDNEG = "cogndneg.tif"  # GDAL_NODATA=-9999 on unsigned 8-bit: matches nothing
 COGI8 = "cogi8.tif"  # SampleFormat 2 with bps 8: signed bytes
 COGI16 = "cogi16.tif"  # int16 DEM: -9999 sentinel column + GDAL_NODATA=-9999
@@ -644,6 +681,17 @@ def fixture_tile(z=TILE_ZOOM):
     """(z, x, y) of the tile containing the fixture centre, OSM/XYZ numbering."""
     lon = (BBOX4326[0] + BBOX4326[2]) / 2
     lat = (BBOX4326[1] + BBOX4326[3]) / 2
+    x = int((lon + 180) / 360 * 2 ** z)
+    y = int((1 - np.arcsinh(np.tan(np.radians(lat))) / np.pi) / 2 * 2 ** z)
+    return z, x, y
+
+
+def swiss_tile(z=TILE_ZOOM):
+    """(z, x, y) of the tile holding the centre of the EPSG:2056 fixture."""
+    gx0, gy0, gx1, gy1 = _swiss_grid()
+    lon, lat = _pyproj.Transformer.from_crs(
+        "EPSG:2056", "EPSG:4326", always_xy=True).transform((gx0 + gx1) / 2,
+                                                            (gy0 + gy1) / 2)
     x = int((lon + 180) / 360 * 2 ** z)
     y = int((1 - np.arcsinh(np.tan(np.radians(lat))) / np.pi) / 2 * 2 ** z)
     return z, x, y

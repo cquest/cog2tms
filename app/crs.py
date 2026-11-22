@@ -187,12 +187,76 @@ _LCC_EPSG = {
 _LINEAR_UNITS = {9001: 1.0, 9002: 1200 / 3937, 9003: 0.3048, 9036: 0.304800609601}
 
 
+# --- optional PROJ fallback (pyproj, extra "crs") --------------------------
+# The table above stays what the service guarantees deterministically forever.
+# When it misses, and only then, a pyproj Transformer speaks for PROJ's whole
+# EPSG database: any projected or geographic CRS, datum shifts included (that
+# is what EPSG:2056 needs: oblique Mercator + CH1903+ translation, ~1 m off if
+# approximated as LCC). Without the extra nothing changes: unknown code ->
+# UnsupportedCRS -> 400. With it, accuracy is PROJ's for its bundled proj.db:
+# datums whose best transformation needs grids pyproj does not ship (NAD27/
+# NADCON, the Japanese ones) get only what PROJ can do without them.
+
+
+_pp: object = Ellipsis  # Ellipsis: not probed yet, None: absent, else the module
+
+
+def _pyproj():
+    """Import pyproj once per process; None once probed absent."""
+    global _pp
+    if _pp is Ellipsis:
+        try:
+            import pyproj
+            _pp = pyproj
+        except ImportError:
+            _pp = None
+    return _pp
+
+
+class ProjCRS(CRS):
+    """A CRS from PROJ (pyproj): WGS84 lon/lat on one side, source CRS
+    definition units on the other - the same contract as the table classes.
+    Transformer is thread-safe (pyproj >= 3.1 keeps a PROJ instance per
+    thread) and built once per COG open, so the reader pool amortizes it."""
+
+    def __init__(self, name, tf):
+        self.name, self._tf = name, tf
+
+    def to_xy(self, lon, lat):
+        return self._tf.transform(lon, lat, direction="inverse")
+
+    def to_xy_many(self, lons, lats):
+        """Batched inverse for the warp control grid: PROJ loops in C."""
+        return self._tf.transform(list(lons), list(lats), direction="inverse")
+
+    def to_lonlat(self, x, y):
+        return self._tf.transform(x, y)
+
+
+def _proj_fallback(code):
+    """PROJ's answer for an EPSG code outside the table; None when pyproj is
+    absent or PROJ cannot make a CRS - operation to WGS84 out of the code."""
+    pp = _pyproj()
+    if pp is None or not code:
+        return None
+    try:
+        tf = pp.Transformer.from_crs(f"EPSG:{code}", "EPSG:4326", always_xy=True)
+    except (pp.exceptions.CRSError, pp.ProjError):
+        return None
+    return ProjCRS(f"EPSG:{code}", tf)
+
+
 def crs_from_geokeys(key: dict) -> CRS:
     """Build a CRS from a parsed GeoKeyDirectory (1024 ModelType, 2048 geographic,
-    3072 projected CS code). Supports a small EPSG subset."""
+    3072 projected CS code). Supports a small EPSG subset in-table, then defers
+    to PROJ when pyproj is installed (extra "crs"); anything else raises."""
     if key.get(1024, 1) == 2:  # geographic
-        if key.get(2048, 4326) in GEO_WGS_LIKE:
+        geo = key.get(2048, 4326)
+        if geo in GEO_WGS_LIKE:
             return GEOGRAPHIC
+        fb = _proj_fallback(geo)
+        if fb is not None:
+            return fb
         raise UnsupportedCRS(f"unsupported geographic CRS {key.get(2048)}")
 
     code = key.get(3072)
@@ -227,6 +291,9 @@ def crs_from_geokeys(key: dict) -> CRS:
                                       key.get(3087, key.get(3083, 0.0)))
     if code == 4326:
         return GEOGRAPHIC
+    fb = _proj_fallback(code)
+    if fb is not None:
+        return fb
     raise UnsupportedCRS(f"unsupported projected CRS {code}")
 
 

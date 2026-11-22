@@ -54,7 +54,7 @@ raster, unreadable samples), `502` (upstream error).
 
 | Topic | Decision |
 |---|---|
-| Engine | Pure-Python COG reader over **curl_cffi** byte-range (libcurl: HTTP/1.1 and HTTP/2 by ALPN, `HTTP2=0` pins 1.1; bodies bounded by a write callback); images with Pillow+numpy; JPEG-in-TIFF blocks decoded by **simplejpeg** (identical pixels, releases the GIL) with a Pillow fallback; warp/resample by **`cv2.remap`** (opencv-python-headless — the one heavy wheel, accepted for the render win). Small surface, prebuilt wheels only, full control of what is fetched. |
+| Engine | Pure-Python COG reader over **curl_cffi** byte-range (libcurl: HTTP/1.1 and HTTP/2 by ALPN, `HTTP2=0` pins 1.1; bodies bounded by a write callback); images with Pillow+numpy; JPEG-in-TIFF blocks decoded by **simplejpeg** (identical pixels, releases the GIL) with a Pillow fallback; warp/resample by **`cv2.remap`** (opencv-python-headless — the one heavy wheel, accepted for the render win). Small surface, prebuilt wheels only, full control of what is fetched — exception accepted: **pyproj**: the PROJ fallback for EPSG codes outside the pure-Python table; base install and Docker image never pull it, the table always takes precedence. |
 | Y orientation | **OSM-style XYZ** (Y points down). Pass-through, no flip. A unit test pins the convention. |
 | Out-of-bounds tiles | **200 + empty tile**: fully transparent PNG/WebP (alpha=0); JPEG has no alpha → solid fill, configurable `EMPTY_TILE_BG` (default `0,0,0`). |
 | Output formats | **PNG, JPEG, WebP** + `format=auto` = the `Accept` header only: webp iff `image/webp` (q>0) is listed explicitly, else png; the source codec (JPEG-in-TIFF) plays **no** role. **Wildcards (`image/*`, `*/*`) never select webp** — JOSM and plain clients send them and cannot decode it. WebP = Pillow `exact=True` (without it, RGB is blended to a background where alpha<255) + `method=0`; `WEBP_LOSSLESS=1` → lossless+exact = bit-identical to PNG. The resolved format is part of the tile-cache key. PNG stays the default when `format` is omitted. |
@@ -109,7 +109,14 @@ pytest-cov, httpx.
   projection keys (3075 = CT 1/8/9/27, both GDAL and ESRI key spellings):
   Snyder series, forward and inverse; < 1 cm and < 1 mm vs PROJ golden values
   (the inverse matches PROJ `+approx`, same series family, to ≤ 0.05 mas);
-  anything else → 400.
+  anything else → **optional** PROJ fallback first, else 400. The fallback
+  (`_proj_fallback`) speaks for PROJ's whole EPSG registry
+  — projected and geographic codes, datum shifts included (EPSG:2056 is its
+  case: CH1903+ oblique Mercator, ~1 m off if approximated as LCC). The table
+  always wins — in-table codes stay deterministic whatever pyproj does — and
+  without the wheel the 400 is unchanged. With it, accuracy is the embedded
+  PROJ's: proj.db ships in the wheel, national grids (NADCON, Japanese) do
+  not, so those datums get PROJ's grid-less transformation.
 
 ## Warp pipeline (`app/tiles.py`)
 
@@ -214,7 +221,7 @@ would oversubscribe across uvicorn workers.
 ```
 cog2tms/
 ├── AGENTS.md
-├── pyproject.toml         # fastapi, uvicorn[standard], curl_cffi, pillow, numpy, simplejpeg, imagecodecs, opencv-python-headless ; dev: pytest, pytest-cov, httpx
+├── pyproject.toml         # fastapi, uvicorn[standard], curl_cffi, pillow, numpy, simplejpeg, imagecodecs, opencv-python-headless ; dev: pytest, pytest-cov, httpx, pyproj 
 ├── app/
 │   ├── main.py            # routes + error mapping + format negotiation + TileJSON + geojson
 │   │                      # + CORS + OpenAPI annotations + HEAD-as-GET middleware
@@ -228,6 +235,7 @@ cog2tms/
 │   │                      # (only COGs with ETag/Last-Modified; purged on change/move)
 │   ├── tiles.py           # XYZ math, overview pick, warp grid, bilinear sampler
 │   ├── crs.py             # pure-Python CRS math + minimal EPSG table
+│   │                      # + pyproj PROJ fallback
 │   ├── empty.py           # memoized empty PNG/JPEG/WebP tiles
 │   ├── config.py          # settings from env
 │   ├── security.py        # URL validation (scheme + anti-SSRF + allowlist)
@@ -236,7 +244,8 @@ cog2tms/
 ├── tests/
 │   ├── conftest.py        # pure-Python COG writer + Range server with byte counter
 │   ├── test_tile.py       # offline unit tests + endpoint error matrix + URL guardrails
-│   ├── test_crs.py        # PROJ golden values (forward/inverse), geokeys dispatch
+│   ├── test_crs.py        # PROJ golden values (forward/inverse), geokeys dispatch,
+│   │                      # pyproj fallback (golden parity, batched grid, absent wheel)
 │   ├── test_ranges.py     # local byte-range proof (bytes served, Range-only, body cap)
 │   ├── test_multirange.py # multi-range support + per-host fallback learning
 │   ├── test_retries.py    # fault injection: 429/5xx retries, negative cache
@@ -305,7 +314,8 @@ lossless + lossy **WebP** blocks (RGB, RGBA+alpha, single-band refused),
 lossless + lossy **JPEG XL** blocks (RGB, RGBA+alpha, gray, 2-sample refused,
 DNG id 52546),
 16-bit single band, GDAL_NODATA, ExtraSamples alpha, 1-bit internal mask,
-ModelTransformation, unsupported CRS, SubIFD-published overviews (empty chain),
+ModelTransformation, unsupported CRS, an EPSG:2056 fixture + its EPSG:3857 twin
+(PROJ fallback, geokeys 2048:4150 + 3072:2056), SubIFD-published overviews (empty chain),
 count-0 merger-hole blocks (bogus past-EOF offsets), **SampleFormat** fixtures
 (int8/int16 with a `-9999` sentinel written over the first column, float32 with
 a NaN sentinel, an out-of-range `GDAL_NODATA`, and the refusals: bps 12, complex
@@ -353,7 +363,17 @@ behaviors (do not break):
 - **CRS goldens** (`cs2cs` values): forward < 1 cm and inverse < 1 mm for 4326,
   3857, L93, CC43, CC46, UTM 31N/33S and a 1-standard-parallel LCC; user-defined
   LCC/TM built from both GDAL (3084-3087) and ESRI (3080-3083, 3092) key
-  spellings; geokeys dispatch + refusal messages; `unit_scale` table;
+  spellings; geokeys dispatch + refusal messages (a refused code is one PROJ
+  itself does not know: 999999, not 2000); `unit_scale` table;
+  **PROJ fallback** : EPSG:2056 goldens
+  digit-identical to pyproj (local cs2cs and the wheel embed the same PROJ),
+  each pair the exact inverse of its x/y (PROJ's oblique-Mercator inverse is
+  iterative, round trip ~0.04 mas); a geographic fallback (NAD27) applies the
+  datum shift instead of passing degrees through; `to_xy_many` bit-identical
+  to per-point `to_xy`; with the wheel absent the 400s are unchanged and the
+  table untouched; the endpoint renders an EPSG:2056 fixture (neighbour tile
+  empty, `.geojson` names `EPSG:2056`) and the same box in 2056 vs 3857 is
+  MSE-parity — forgetting the ~270 m CH1903+ shift would move it ~40 px;
 - **pixel semantics**: 16-bit refuses to render without `rescale`, and
   `rescale=0,65535` restores the 8-bit fixture bit-for-bit; `GDAL_NODATA`
   removes coverage only when every band matches, and never raises on a
@@ -464,7 +484,11 @@ nodata compared without a cast (no more 500 on `-9999`/NaN), signed and float
 pixels rendered behind a mandatory `rescale`, then the GDAL JPEG layout (IFD tag
 347) covered by offline fixtures — its splice pinned bit-identical to
 self-contained blocks, and an undecodable block is a 404 instead of a 500, then
-JPEG XL decode (codec 50002, DNG 1.7's 52546) through imagecodecs/libjxl.
+JPEG XL decode (codec 50002, DNG 1.7's 52546) through imagecodecs/libjxl, then
+the  PROJ fallback: the pure-Python table always
+wins, out-of-table EPSG codes (first case 2056, CH1903+ — the hand-written
+approximation was measured up to 1 m off) render through PROJ, absent wheel
+keeps the 400.
 
 ## Follow-ups
 

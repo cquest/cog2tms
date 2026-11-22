@@ -37,6 +37,9 @@ GET /openapi.json   GET /docs   GET /redoc       # schéma OpenAPI 3.1 + docs (s
 - `blackmax=0..255` : les pixels quasi noirs (lisiérés d'orthophotos sans
   masque) passent en non-couverture ; défaut `20`, `-1` désactive.
 - transparence sur NODATA
+- **SIG** : 4326, 3857, Lambert-93, CC42–48, UTM, LCC/UTM définis par
+  l'utilisateur — pur Python et déterministes. Les autres codes EPSG ne sont
+  servis qu'avec le repli PROJ.
 - Erreurs : `400` zoom / indice / format / taille / URL, données signées, 32
   bits ou flottantes sans `rescale`, SIG non pris en charge, chaîne de
   redirections refusée ; `404` COG injoignable, pas un GeoTIFF ou format
@@ -146,7 +149,6 @@ docker run -p 3857:3857 cog2tms   # http://localhost:3857
 docker run -p 3857:3857 -v cog2tms-cache:/var/cache/cog2tms \
   -e HEAD_CACHE=/var/cache/cog2tms/heads.sqlite3 cog2tms
 ```
-
 ## Licence
 
 WTFPL v2 — voir [LICENSE](LICENSE). Les fichiers tiers vendorisés gardent leurs

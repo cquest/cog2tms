@@ -31,6 +31,14 @@ GOLDEN = [
     ({3072: 3857}, "EPSG:3857", [  # spherical web mercator
         (2.35, 48.855, 261600.80336419, 6250293.64590400),
         (-71.0667, -45.0, -7911108.85635833, -5621521.48619207)]),
+    ({3072: 2056}, "EPSG:2056", [  # CH1903+/LV95: not in the table - this is
+        # the PROJ fallback (extra "crs"); cs2cs here is the very PROJ that
+        # pyproj embeds (both 9.9), values full precision: PROJ's oblique
+        # Mercator inverse is iterative (round trip ~0.04 mas), so each pair
+        # is the exact inverse of its x/y, embedded as cs2cs prints them
+        (7.43958334069, 46.95240556591, 2600072.38970008818, 1200147.05558741465),
+        (8.54170000839, 47.37690001016, 2683303.89373908751, 1247925.62789820321),
+        (6.14320000609, 46.20440001024, 2500016.01611669641, 1117821.06973344414)]),
 ]
 
 
@@ -67,8 +75,8 @@ def test_geokeys_dispatch():
 def test_geokeys_refused():
     with pytest.raises(crs.UnsupportedCRS, match="unsupported geographic CRS 42304"):
         crs.crs_from_geokeys({1024: 2, 2048: 42304})
-    with pytest.raises(crs.UnsupportedCRS, match="unsupported projected CRS 2000"):
-        crs.crs_from_geokeys({3072: 2000})
+    with pytest.raises(crs.UnsupportedCRS, match="unsupported projected CRS 999999"):
+        crs.crs_from_geokeys({3072: 999999})  # 2000 would pass: PROJ knows it
     with pytest.raises(crs.UnsupportedCRS, match="unsupported projected CRS None"):
         crs.crs_from_geokeys({})
 
@@ -118,3 +126,38 @@ def test_unit_scale():
     assert crs.unit_scale(9036) == 0.304800609601  # Indian foot
     assert crs.unit_scale(None) == 1.0  # key absent: assume metres
     assert crs.unit_scale(9093) == 1.0  # unknown unit: assume metres
+
+
+def test_pyproj_fallback_geographic_shift():
+    """A geographic datum that is not WGS-like (NAD27): the fallback's
+    to_xy must apply the datum shift, not pass degrees through unchanged."""
+    c = crs.crs_from_geokeys({1024: 2, 2048: 4267})
+    assert c.name == "EPSG:4267"
+    lon, lat = -95.4, 29.9  # inside NAD27's area of use
+    x, y = c.to_xy(lon, lat)  # WGS84 lon/lat -> NAD27 lon/lat
+    shift = math.hypot((x - lon) * math.cos(math.radians(lat)), y - lat) * 111_320
+    assert 0.1 < shift < 100.0  # metres: shifted, but still a NAD27 neighbour
+    rlon, rlat = c.to_lonlat(x, y)
+    assert abs(rlon - lon) < 1e-8 and abs(rlat - lat) < 1e-8
+
+
+def test_pyproj_fallback_batch_is_pointwise():
+    """to_xy_many (warp control grid) must be bit-identical to the per-point
+    contract - same PROJ operation, just looped in C."""
+    c = crs.crs_from_geokeys({3072: 2056})
+    lons, lats = [7.4, 8.5, 6.1], [46.9, 47.3, 46.2]
+    bx, by = c.to_xy_many(lons, lats)
+    for i, (lo, la) in enumerate(zip(lons, lats)):
+        px, py = c.to_xy(lo, la)
+        assert bx[i] == px and by[i] == py
+
+
+def test_pyproj_absent_keeps_the_400(monkeypatch):
+    """Without the extra, nothing changes: codes outside the table stay 400
+    (the fallback must never be a silent second path that half works)."""
+    monkeypatch.setattr(crs, "_pp", None)  # pretend the wheel is absent
+    for keys, msg in (({3072: 2056}, "unsupported projected CRS 2056"),
+                      ({1024: 2, 2048: 4267}, "unsupported geographic CRS 4267")):
+        with pytest.raises(crs.UnsupportedCRS, match=msg):
+            crs.crs_from_geokeys(keys)
+    assert crs.crs_from_geokeys({3072: 3857}).name == "EPSG:3857"  # table untouched

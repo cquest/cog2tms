@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from .conftest import (BBOX4326, COG12, COG3857, COG4326, COGBADCRS, COGCX, COGFP2,
-                       COGNDJUNK, COGNDNEG, COGPRED3, COGROT, COGWEBP1, _web,
-                       fixture_tile, tile_url)
+from .conftest import (BBOX4326, COG12, COG2056, COG3857, COG4326, COGBADCRS, COGCX,
+                       COGFP2, COGNDJUNK, COGNDNEG, COGPRED3, COGROT, COGSWISS3857,
+                       COGWEBP1, _pyproj, _web, fixture_tile, swiss_tile, tile_url)
 
 
 def test_healthz(client):
@@ -254,6 +254,36 @@ def test_reprojection_parity(client, server):
         client.get(tile_url(server, COG4326, z, x, y)).content)))[..., :3]
     b = np.asarray(Image.open(io.BytesIO(
         client.get(tile_url(server, COG3857, z, x, y)).content)))[..., :3]
+    mse = ((a.astype(np.float64) - b) ** 2).mean()
+    assert mse < 100, mse
+
+
+@pytest.mark.skipif(_pyproj is None, reason="PROJ fallback is the extra 'crs'")
+def test_epsg2056_proj_fallback(client, server):
+    """A COG whose CRS is outside the table renders through PROJ (CH1903+/
+    LV95): coverage where the footprint is, empty next door, and the metadata
+    route names the CRS it used."""
+    z, x, y = swiss_tile()
+    r = client.get(tile_url(server, COG2056, z, x, y))
+    assert r.status_code == 200
+    assert np.asarray(Image.open(io.BytesIO(r.content)))[..., 3].any()
+    e = client.get(tile_url(server, COG2056, z, x + 1, y))
+    assert e.status_code == 200  # out-of-footprint tile: empty, not an error
+    assert not np.asarray(Image.open(io.BytesIO(e.content)))[..., 3].any()
+    g = client.get(f"/c2t/{z}/{x}/{y}.geojson?u={server.base}/{COG2056}").json()
+    assert g["properties"]["crs"] == "EPSG:2056"
+
+
+@pytest.mark.skipif(_pyproj is None, reason="PROJ fallback is the extra 'crs'")
+def test_epsg2056_datum_parity(client, server):
+    """The same Swiss box as an EPSG:2056 grid and as an EPSG:3857 grid must
+    land on the same pixels: forgetting the CH1903+ shift moves it by ~270 m,
+    some 40 tile-px at this zoom."""
+    z, x, y = swiss_tile()
+    a = np.asarray(Image.open(io.BytesIO(
+        client.get(tile_url(server, COG2056, z, x, y)).content)))[..., :3]
+    b = np.asarray(Image.open(io.BytesIO(
+        client.get(tile_url(server, COGSWISS3857, z, x, y)).content)))[..., :3]
     mse = ((a.astype(np.float64) - b) ** 2).mean()
     assert mse < 100, mse
 
