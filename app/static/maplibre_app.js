@@ -109,10 +109,23 @@ function renderInfo(tj, gj) {
     dl.append(dt, dd);
   };
   add("CRS", gj.properties.crs);
+  const cog = tj.cog ?? {};  // source provenance, as the tilejson reports it
+  if (cog.compression) add("compression", cog.compression);
+  if (typeof cog.size === "number") add("size", humanSize(cog.size));
+  if (cog.last_modified) add("last modified", cog.last_modified);
   add("bbox", tj.bbox.map((v) => v.toFixed(4)).join(", "));
   add("zoom", `${tj.minzoom}\u2013${tj.maxzoom} (native)`);
   add("footprint", `${ring.length - 1} vertices`);
   $("info").hidden = false;
+}
+
+// decimal units, the convention for disk files: 875 MB, 3.8 GB
+function humanSize(bytes) {
+  const u = ["B", "kB", "MB", "GB", "TB"];
+  const i = Math.min(u.length - 1, bytes ? Math.floor(Math.log10(bytes) / 3) : 0);
+  const v = bytes / 1000 ** i;
+  const dec = i ? (v >= 100 ? 0 : v >= 10 ? 1 : 2) : 0;
+  return `${+(v.toFixed(dec))} ${u[i]}`;
 }
 
 function setUrls() {
