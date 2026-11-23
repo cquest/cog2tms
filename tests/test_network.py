@@ -13,6 +13,7 @@ COG_SMALL = "https://data.cquest.org/temp/cog4josm/COG_BayonneSudEst.tif"
 COG_BIG = "https://data.cquest.org/temp/cog4josm/Anglet2025_COG.tif"
 COG_MERGED = "https://data.cquest.org/temp/cog4josm/COG_Bayonne_2025b.tif"
 COG_WEBP = "https://data.cquest.org/temp/cog4josm/Test_webp.tif"
+COG_JXL = "https://data.cquest.org/temp/cog4josm/Test_jxl.tif"
 COG_CENTER = (-1.421406, 43.465922)
 
 
@@ -141,6 +142,29 @@ def test_cog_webp(client):
     assert r.status_code == 200
     a = np.asarray(Image.open(io.BytesIO(r.content)))
     assert (a[..., 3] > 0).sum() > 25000  # measured 33.5k: 492x417 m of overlap
+
+
+def test_cog_jxl(client):
+    """JPEG XL compressed COG (libtiff tag 50002, one bare JXL codestream per
+    block, 7 levels): full-res pixels match the JPEG COG of the same area
+    within tolerance (measured MSE 9.4), overview tiles render off the small
+    pyramid, and the TileJSON cog block names the codec and the file."""
+    r = _t(client, f"/c2t/18/130009/95839?u={COG_JXL}")
+    assert r.status_code == 200
+    a = np.asarray(Image.open(io.BytesIO(r.content)))
+    assert (a[..., 3] > 0).sum() > 200000  # the tile sits inside the footprint
+    r = _t(client, f"/c2t/18/130009/95839?u={COG_SMALL}")
+    b = np.asarray(Image.open(io.BytesIO(r.content)))
+    both = (a[..., 3] > 0) & (b[..., 3] > 0)
+    mse = np.mean((a[..., :3][both].astype(int) - b[..., :3][both].astype(int)) ** 2)
+    assert mse < 40
+    r = _t(client, f"/c2t/16/32502/23959?u={COG_JXL}")  # straddles the footprint
+    assert r.status_code == 200
+    a = np.asarray(Image.open(io.BytesIO(r.content)))
+    assert (a[..., 3] > 0).sum() > 40000  # measured 47k
+    tj = client.get(f"/c2t.tms.json?u={COG_JXL}").json()["cog"]
+    assert tj["compression"] == "jpegxl" and tj["size"] > 8_000_000
+    assert tj["last_modified"]  # the host carries one: it must show up
 
 
 def test_cog_merged(client):

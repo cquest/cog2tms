@@ -286,6 +286,7 @@ COG_SMALL  = "https://data.cquest.org/temp/cog4josm/COG_BayonneSudEst.tif"   # 8
 COG_BIG    = "https://data.cquest.org/temp/cog4josm/Anglet2025_COG.tif"      # 3.8 GB (BigTIFF + masks)
 COG_MERGED = "https://data.cquest.org/temp/cog4josm/COG_Bayonne_2025b.tif"   # 5.9 GB (cog_merger union)
 COG_WEBP   = "https://data.cquest.org/temp/cog4josm/Test_webp.tif"           # 6.8 MB (WebP 50001)
+COG_JXL    = "https://data.cquest.org/temp/cog4josm/Test_jxl.tif"            # 8.1 MB (JPEG XL 50002)
 COG_CENTER = (-1.421406, 43.465922)   # west of Bayonne
 ```
 
@@ -296,6 +297,7 @@ COG_CENTER = (-1.421406, 43.465922)   # west of Bayonne
 | COG_Bayonne{NordEst,NordOuest,SudOuest}.tif | 1.5–1.7 GB | classic TIFF | EPSG:3943 | 4-tile footprint seam |
 | COG_Bayonne_2025b.tif | 5.9 GB | **BigTIFF**, JPEG, 8 overviews as **SubIFDs** | EPSG:3943 | `cog_merger` union of the 4 Bayonne COGs: count-0 hole blocks (SE notch), 34 MB TileOffsets arrays (slice path) |
 | Test_webp.tif | 6.8 MB | classic TIFF, **WebP (50001)** VP8, 512×512 blocks, 7 levels | EPSG:3943 | 571 m footprint (8192² @ 7 cm); center `18/130009/95839`, GDAL parity 0, z18 MSE 8.4 vs COG_SMALL |
+| Test_jxl.tif | 8.1 MB | classic TIFF, **JPEG XL (50002)**, 7 levels | EPSG:3943 | same center tile `18/130009/95839`; z18 MSE 9.4 vs COG_SMALL; TileJSON `cog` block reports `jpegxl` |
 
 Verified: server advertises `Accept-Ranges: bytes`; opaque RGB without NoData on Bayonne;
 4.8 cm/px GSD → useful zoom ~17–19. Tiles over `COG_CENTER`: `13/4063/2995`,
@@ -468,6 +470,10 @@ behaviors (do not break):
 - **webp COG** (COG_WEBP = Test_webp.tif, compression 50001): z18 center tile
   non-empty and MSE < 40 vs the JPEG COG of the same area (two lossy codecs,
   measured 8.4); footprint-straddling z16 tile keeps > 25k opaque px;
+- **jpegxl COG** (COG_JXL = Test_jxl.tif, compression 50002): z18 center tile
+  non-empty and MSE < 40 vs the JPEG COG (measured 9.4); footprint-straddling
+  z16 overview tile keeps > 40k opaque px; the TileJSON `cog` block reports
+  `jpegxl`, the byte size and a `last_modified` (the host carries one);
 - **merged COG** (COG_MERGED, `cog_merger` union of the 4 Bayonne files):
   overview tiles render (SubIFDs found), notch tile fully transparent
   (count-0 holes), adjacent black-fringe tile transparent by default and
