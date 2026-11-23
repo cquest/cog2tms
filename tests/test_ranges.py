@@ -8,9 +8,9 @@ import time
 import pytest
 
 from app.httprange import CogFetch, RangeReader
-from .conftest import COG4326, COGJPT, fixture_tile, tile_url
+from .conftest import COG4326, COGBIG, COGJPT, fixture_tile, tile_url
 
-FIXTURES = (COG4326, COGJPT)  # plain deflate, and JPEG whose DQT sits in tag 347
+FIXTURES = (COG4326, COGJPT, COGBIG)  # plain deflate, JPEG with DQT in tag 347, BigTIFF
 
 
 def test_render_reads_only_needed_bytes(client, server, counter, fixtures_dir):

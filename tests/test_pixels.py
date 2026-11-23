@@ -1,7 +1,7 @@
 """Pixel semantics beyond plain RGB8: 16-bit + rescale, GDAL nodata, SampleFormat
 (signed/float pixels, NaN no-data), ExtraSamples alpha, the sliced fetch of big
-TileOffsets/TileByteCounts arrays, the sharpen gating, and the pixel-center 1:1
-warp convention."""
+TileOffsets/TileByteCounts arrays, the BigTIFF layout, the sharpen gating, and the
+pixel-center 1:1 warp convention."""
 import math
 
 import cv2
@@ -12,7 +12,7 @@ from app import config
 from app import geotiff as g
 from app import tiles
 from app.httprange import LocalReader
-from .conftest import (COG12, COG16, COG4326, COGALPHA, COGCX, COGF32, COGFP2,
+from .conftest import (COG12, COG16, COG4326, COGALPHA, COGBIG, COGCX, COGF32, COGFP2,
                        COGHOLE, COGI8, COGI16, COGMASK, COGND, COGNDJUNK, COGNDNEG,
                        COGPRED3, COGROT, COGSUB, W, fixture_tile, write_cog)
 
@@ -216,6 +216,25 @@ def test_subifd_overviews(fixtures_dir):
         rrgb, rvalid = tiles.render_tile(ref, *fixture_tile(), 256)
     finally:
         ref.close()
+    assert (rgb == rrgb).all() and (valid == rvalid).all()
+
+
+def test_bigtiff_fixture(fixtures_dir):
+    """BigTIFF (version 43: 64-bit offsets and counts, LONG8 block index, values
+    inline up to 8 bytes) - the layout gdal_translate switches to past 4 GB, and
+    the one both 4 GB+ reference COGs use. Pinned offline: the file really is
+    version 43, the reader parses it as such, and the same content renders
+    bit-identical to the classic-TIFF twin (LONG8 index and mask included)."""
+    assert (fixtures_dir / COGBIG).open("rb").read(4) == b"II+\x00"  # magic 43
+    cog = _open(fixtures_dir, COGBIG)
+    try:
+        assert cog.abis == 8  # the IFD parser widened entries to 20 bytes
+        assert len(cog.levels) == 2 and cog.levels[1].width == W // 2
+        assert [(m.width, m.height) for m in cog.masks] == [(W, W)]
+        rgb, valid = tiles.render_tile(cog, *fixture_tile(), 256)
+    finally:
+        cog.close()
+    rrgb, rvalid = _render(fixtures_dir, COGMASK)
     assert (rgb == rrgb).all() and (valid == rvalid).all()
 
 

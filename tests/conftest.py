@@ -219,8 +219,10 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
               nodata=None, geokeys=None, lzw_ours=True, predictor=1, mask=False,
               rotated=False, subifd=False, holes=False, webp_lossless=True,
               fmt=None, sentinel=None, jpegtables=None, keep_tables=False,
-              bad_tables=False, jxl_lossless=True):
-    """Classic tiled little-endian TIFF: level 0 + a 2x internal overview, plus
+              bad_tables=False, jxl_lossless=True, big=False):
+    """Tiled little-endian TIFF (classic, or BigTIFF when big=True: version 43,
+    64-bit offsets/counts, LONG8 block index - what gdal_translate switches to
+    past 4 GB): level 0 + a 2x internal overview, plus
     optional extras - a 1-bit internal coverage mask (NewSubfileType & 4), a
     horizontal-differencing predictor, GDAL_NODATA, ExtraSamples=ALPHA, a
     ModelTransformation (rotated raster, which the reader must refuse),
@@ -256,11 +258,12 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
         bits = np.zeros((H, W), np.uint8)
         bits[:, W // 3:] = 1
         lvls.append(dict(arr=bits, sub=4, samples=1, bps=1, comp=8, phot=1, geo=False))
-    for l in lvls:  # a value array of <= 4 bytes must stay inline in the IFD
-        # entry (TIFF rule); 1-bit masks never difference
-        l["bps_len"] = 2 * l["samples"] if l["samples"] > 2 else 0
+    abis = 8 if big else 4  # address size: BigTIFF widens offsets, counts, inline values
+    for l in lvls:  # a value array that fits the IFD entry's value field must stay
+        # inline (TIFF rule: 4 bytes classic, 8 in BigTIFF); 1-bit masks never difference
+        l["bps_len"] = 2 * l["samples"] if 2 * l["samples"] > abis else 0
         l["fmt"] = 0 if l["bps"] == 1 else (fmt or 1)  # 0 = tag 339 absent (unsigned)
-        l["fmt_len"] = 2 * l["samples"] if l["fmt"] and l["samples"] > 2 else 0
+        l["fmt_len"] = 2 * l["samples"] if l["fmt"] and 2 * l["samples"] > abis else 0
         l["pred"] = predictor if l["bps"] in (8, 16) or l["fmt"] else 1
     blobs = [_tiles(l["arr"], l["comp"], lzw_ours, l["pred"], l["bps"],
                     webp_lossless, jxl_lossless)
@@ -272,9 +275,10 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
 
     # rough layout: header | tiles | areas | ifds ; areas are small so offsets
     # are computed exactly in a second pass
-    hdr = 8
+    hdr = 16 if big else 8
     tile_off = hdr
     sizes0 = sum(len(b) for lv in blobs for b in lv)
+    ityp = 16 if big else 4  # block index arrays: LONG8 in BigTIFF, LONG classic
 
     geokeys = geokeys or ([1, 1, 0, 2, 1024, 0, 1, 2, 2048, 0, 1, 4326] if geographic else
                           [1, 1, 0, 1, 1024, 0, 1, 1, 2048, 0, 1, 4979, 2052, 0, 1, 9001,
@@ -308,34 +312,35 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
                 (317, 3, 1, struct.pack("<H", l["pred"])[:4]),
                 (322, 3, 1, struct.pack("<H", TILE)[:4]),
                 (323, 3, 1, struct.pack("<H", TILE)[:4]),
-                (324, 4, nt, None), (325, 4, nt, None)]
+                (324, ityp, nt, None), (325, ityp, nt, None)]
         if l["geo"]:
             ent += [(33550, 12, 3, None), (33922, 12, 6, None), (34735, 3, len(geokeys), None)]
             if rotated:  # ModelTransformation: the reader refuses rotated rasters
                 ent.append((34264, 12, 16, None))
-            if nodata:  # GDAL_NODATA (ASCII, inline when 4 bytes or fewer)
+            if nodata:  # GDAL_NODATA (ASCII, inline when it fits the value field)
                 ent.append((42113, 2, len(nodata),
-                            struct.pack("<4s", nodata.encode()) if len(nodata) <= 4 else None))
+                            nodata.encode() if len(nodata) <= abis else None))
         if i == 0 and subifd:  # SubIFDs (cog_merger layout): overview IFD offsets
             no = len(lvls) - 1
-            # a single LONG must be inline (spec: no pointer for <=4-byte values)
-            ent.append((330, 4, no, b"PTRO" if no == 1 else None))
+            # a single value that fits the entry must be inline (spec: no pointer)
+            ent.append((330, ityp, no, b"PTRO" if no == 1 else None))
             if no > 1:
-                areas.append((330, 4 * no))
+                areas.append((330, abis * no))
         # area layout: bps (0 if inline) | fmt (0 if inline/absent) | offs | cnts |
         # jpegtables (0 if absent) | then for geo IFDs: scale | tiepoint | geokeys |
         # transformation | nodata | then subifds
-        areas = [(258, l["bps_len"]), (339, l["fmt_len"]), (324, 4 * nt), (325, 4 * nt)]
+        areas = [(258, l["bps_len"]), (339, l["fmt_len"]),
+                 (324, abis * nt), (325, abis * nt)]
         if tabs[i]:
             areas.append((347, len(tabs[i])))
         if l["geo"]:
             areas += [(33550, 24), (33922, 48), (34735, 2 * len(geokeys))]
             if rotated:
                 areas.append((34264, 128))
-            if nodata and len(nodata) > 4:
+            if nodata and len(nodata) > abis:
                 areas.append((42113, len(nodata)))
         if i == 0 and subifd:
-            areas.append((330, 4 * (len(lvls) - 1)))
+            areas.append((330, abis * (len(lvls) - 1)))
         return ent, areas
 
     def area_bytes(i):
@@ -349,8 +354,9 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
                  if l["bps_len"] else b"")
         a.extend(struct.pack("<" + "H" * l["samples"], *([l["fmt"]] * l["samples"]))
                  if l["fmt_len"] else b"")
-        a.extend(struct.pack("<" + "I" * nt, *([0] * nt)))   # TileOffsets (patched)
-        a.extend(struct.pack("<" + "I" * nt, *cnts))
+        of = "Q" if big else "I"  # block index entries: 64-bit in BigTIFF
+        a.extend(struct.pack("<" + of * nt, *([0] * nt)))  # TileOffsets (patched)
+        a.extend(struct.pack("<" + of * nt, *cnts))
         if tabs[i]:
             a.extend(tabs[i])  # JPEGTables: SOI + DQT + terminator
         if l["geo"]:
@@ -360,10 +366,10 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
             if rotated:
                 m = [psx, 0, 0, 0, 0, -psy, 0, 0, 0, 0, 0, 0, ox, oy, 0, 1]
                 a.extend(struct.pack("<16d", *m))
-            if nodata and len(nodata) > 4:
-                a.extend(nodata.encode())  # GDAL_NODATA beyond 4 bytes: out of line
+            if nodata and len(nodata) > abis:
+                a.extend(nodata.encode())  # GDAL_NODATA beyond the value field: out of line
         if i == 0 and subifd and len(lvls) > 2:
-            a.extend(bytes(4 * (len(lvls) - 1)))  # overview IFD offsets (patched)
+            a.extend(bytes(abis * (len(lvls) - 1)))  # overview IFD offsets (patched)
         return bytes(a)
 
     area_blobs = [area_bytes(i) for i in range(len(lvls))]
@@ -375,21 +381,23 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
         for code, size in areas:
             pos[code] = p
             p += size
-        out = struct.pack("<H", len(ent))
+        cnt_f = "Q" if big else "H"  # IFD entry count: QUAD in BigTIFF, SHORT classic
+        val_f = "Q" if big else "I"  # counts, pointers and inline values: 64-bit
+        out = struct.pack("<" + cnt_f, len(ent))
         for code, typ, cnt, raw in ent:
             if raw is None:
-                raw = struct.pack("<I", pos[code])
+                raw = struct.pack("<" + val_f, pos[code])
             elif raw == b"PTRO":  # single SubIFD offset: inline, resolved now
-                raw = struct.pack("<I", ifd_offs[1])
-            out += struct.pack("<HHI", code, typ, cnt) + raw[:4].ljust(4, b"\0")
-        out += struct.pack("<I", next_off)
+                raw = struct.pack("<" + val_f, ifd_offs[1])
+            out += struct.pack("<HH" + val_f, code, typ, cnt) + raw[:abis].ljust(abis, b"\0")
+        out += struct.pack("<" + val_f, next_off)
         return out
 
     area_start = tile_off + sizes0
     ifd_offs, p = [], area_start + sum(len(a) for a in area_blobs)
     for i in range(len(lvls)):  # IFD sizes follow from their entry lists
         ifd_offs.append(p)
-        p += 2 + 12 * len(ifd_entries(i)[0]) + 4
+        p += (8 if big else 2) + (2 * abis + 4) * len(ifd_entries(i)[0]) + abis
 
     # patch tile offsets inside area_blobs (absolute file offsets); merger
     # holes get count 0 and an offset past EOF: a reader that (wrongly) tried
@@ -401,18 +409,23 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
         cols = lvls[i]["arr"].shape[1] // TILE
         for j, b in enumerate(lv):
             bad = holes and i < 2 and j % cols == cols - 1
-            ab[base + 4 * j: base + 4 * j + 4] = struct.pack("<I", 0x7FFF_FFFF if bad else cur)
+            ab[base + abis * j: base + abis * (j + 1)] = struct.pack(
+                "<" + ("Q" if big else "I"), 0x7FFF_FFFF if bad else cur)
             cur += len(b)
         area_blobs[i] = bytes(ab)
 
     if subifd and len(lvls) > 2:  # SubIFDs array of IFD0 (last area): overview offsets
         ab = bytearray(area_blobs[0])
-        p330 = len(ab) - 4 * (len(lvls) - 1)
+        p330 = len(ab) - abis * (len(lvls) - 1)
         for k, o in enumerate(ifd_offs[1:]):
-            ab[p330 + 4 * k: p330 + 4 * k + 4] = struct.pack("<I", o)
+            ab[p330 + abis * k: p330 + abis * (k + 1)] = struct.pack(
+                "<" + ("Q" if big else "I"), o)
         area_blobs[0] = bytes(ab)
 
-    out = bytearray(struct.pack("<2sHI", b"II", 42, ifd_offs[0]))
+    if big:  # BigTIFF: version 43, offset size 8 + reserved, then the 64-bit IFD offset
+        out = bytearray(struct.pack("<2sHH2sQ", b"II", 43, 8, b"\0\0", ifd_offs[0]))
+    else:
+        out = bytearray(struct.pack("<2sHI", b"II", 42, ifd_offs[0]))
     for lv in blobs:
         for b in lv:
             out.extend(b)
@@ -570,6 +583,8 @@ def fixtures_dir(tmp_path_factory):
               geographic=True, predictor=2)  # deflate + horizontal differencing
     write_cog(d / "cogmask.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
               geographic=True, mask=True)  # 1-bit internal coverage mask
+    write_cog(d / "cogbig.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, mask=True, big=True)  # same file as BigTIFF (version 43)
     write_cog(d / "cogrot.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
               geographic=True, rotated=True)  # ModelTransformation: refused
     write_cog(d / "cogsub.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
@@ -649,6 +664,7 @@ COGND = "cognd.tif"  # GDAL_NODATA = 0
 COGALPHA = "cogalpha.tif"  # RGB + alpha band (ExtraSamples), transparent hole
 COGPRED = "cogpred.tif"  # deflate blocks with a horizontal-differencing predictor
 COGMASK = "cogmask.tif"  # 1-bit internal coverage mask (west third no-data)
+COGBIG = "cogbig.tif"  # the mask fixture again, written as BigTIFF (64-bit layout)
 COGROT = "cogrot.tif"  # ModelTransformation instead of tiepoint: refused
 COGWEBP = "cogwebp.tif"  # same content, lossless WebP blocks (compression 50001)
 COGWEBPL = "cogwebpl.tif"  # lossy WebP blocks (VP8, 4:2:0)

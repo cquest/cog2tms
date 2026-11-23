@@ -319,7 +319,8 @@ without SOI) — single-band JPEG, LZW (both dialects)/PackBits/ZSTD/predictor-2
 lossless + lossy **WebP** blocks (RGB, RGBA+alpha, single-band refused),
 lossless + lossy **JPEG XL** blocks (RGB, RGBA+alpha, gray, 2-sample refused,
 DNG id 52546),
-16-bit single band, GDAL_NODATA, ExtraSamples alpha, 1-bit internal mask,
+16-bit single band, GDAL_NODATA, ExtraSamples alpha, 1-bit internal mask (and the
+same file written as **BigTIFF**: version 43, 20-byte IFD entries, LONG8 block index),
 ModelTransformation, unsupported CRS, an EPSG:2056 fixture + its EPSG:3857 twin
 (PROJ fallback, geokeys 2048:4150 + 3072:2056), SubIFD-published overviews (empty chain),
 count-0 merger-hole blocks (bogus past-EOF offsets), **SampleFormat** fixtures
@@ -399,7 +400,12 @@ behaviors (do not break):
   `_SLICE_AT` fetched as per-window slices — pixels identical to whole-load;
   **SubIFD overviews** (tag 330, empty IFD chain) open with the same levels and
   render pixel-identical; **count-0 blocks** (merger holes, fixture offsets
-  past EOF) are never fetched and stay no-coverage;
+  past EOF) are never fetched and stay no-coverage; **BigTIFF** (magic 43,
+  64-bit offsets/counts, LONG8 block index, values inline to 8 bytes) opens with
+  the same levels + mask and renders **bit-identical to the classic-TIFF twin**
+  — the layout both 4 GB+ reference COGs use, pinned offline (GDAL reads our
+  fixture with identical `gdalinfo -mask` output); every upstream request still
+  carries `Range:` there;
 - **warp convention**: a fixture georeferenced exactly 1:1 on the tile matrix
   renders **bit-identical to the source pixels** — pins pixel-center sampling
   (remap coordinates vs GeoTIFF corner `ox/oy`) and the never-upscale overview
@@ -501,7 +507,9 @@ JPEG XL decode (codec 50002, DNG 1.7's 52546) through imagecodecs/libjxl, then
 the PROJ fallback: the pure-Python table always
 wins, out-of-table EPSG codes (first case 2056, CH1903+ — the hand-written
 approximation was measured up to 1 m off) render through PROJ, absent wheel
-keeps the 400.
+keeps the 400, then the BigTIFF offline fixture: the mask fixture rewritten as
+version 43 by the conftest writer, pinned bit-identical to its classic-TIFF twin
+(the 4 GB+ layout was only exercised by the network COGs before that).
 
 ## Follow-ups
 
@@ -534,8 +542,9 @@ keeps the 400.
   (`imagecodecs.jpegxl_*` decodes; Pillow cannot write JXL).
 - Close to free: LERC/CCITT *decode* (new `comp` dispatch branches +
   fixtures); average-area resampling option (`resampling=`); rescale percentile
-  auto; BigTIFF offline fixture (today only the network COGs exercise it);
-  BigTIFF overview masks on more samples.
+  auto; BigTIFF overview masks on more samples (the offline BigTIFF fixture now
+  pins the level-0 mask path; masks attached to overview levels stay a
+  network-COG case).
 - Known limits: the pure-Python LZW fallback reads only its own variant (libtiff
   output needs imagecodecs); `PNG_COMPRESS` retune (level 0: 6 ms vs 15 ms,
   +13 % bytes) is the last non-dependency perf lever.
