@@ -1,5 +1,5 @@
 """Block decoders: JPEG-in-TIFF blocks, simplejpeg/Pillow parity, imagecodecs
-LZW/PackBits/ZSTD/WebP, threaded window decode."""
+LZW/PackBits/ZSTD/WebP/JPEG XL/JPEG 2000, threaded window decode."""
 import threading
 
 import numpy as np
@@ -8,8 +8,9 @@ import pytest
 from app import geotiff as g
 from app import tiles
 from app.httprange import LocalReader
-from .conftest import (COG4326, COGALPHA, COGJPT, COGJPT1, COGJPTBAD, COGJPTD9,
-                       COGJPTNE, COGJPTSELF, COGLZW, COGLZWLIB, COGJPEG, COGJPEG1,
+from .conftest import (COG4326, COGALPHA, COGJ2K, COGJ2K2, COGJ2KA, COGJ2KG, COGJ2KL,
+                       COGJPT, COGJPT1, COGJPTBAD, COGJPTD9, COGJPTNE, COGJPTSELF,
+                       COGLZW, COGLZWLIB, COGJPEG, COGJPEG1,
                        COGJXL, COGJXL2, COGJXLA, COGJXLG, COGJXLD, COGJXLL,
                        COGPACK, COGPRED, COGWEBP, COGWEBPA, COGWEBPL, COGZSTD,
                        TBL_JPEGTM, TILE, _block, _jpeg_tables, fixture_tile,
@@ -136,7 +137,8 @@ def test_threaded_decode_matches_inline(fixtures_dir, monkeypatch):
     monkeypatch.setattr(g, "_PAR_MIN_PX", 0)  # the fixture windows are small
     names = (COG4326, COGJPEG)  # deflate, and JPEG when simplejpeg is present
     if g._ic is not None:
-        names += (COGWEBP,)  # lossless WebP, imagecodecs (the pool-eligible path)
+        # lossless WebP and JPEG 2000, imagecodecs (the pool-eligible paths)
+        names += (COGWEBP, COGJ2K)
     for name in names:
         monkeypatch.setattr(g, "_POOL", None)
         inline = _rgb_valid(*_render(fixtures_dir, name))
@@ -151,9 +153,11 @@ def test_threaded_decode_needs_a_gil_free_codec_and_a_big_window():
     lvl.tilew = lvl.tileh = 512
     lzw_par = g._ic is not None  # imagecodecs LZW releases the GIL, ours is Python
     webp_par = g._ic is not None  # libwebp in imagecodecs releases the GIL
+    j2k_par = g._ic is not None  # OpenJPEG in imagecodecs releases the GIL (3.7x)
     for comp, expect in ((1, False), (5, lzw_par), (32773, False), (8, True),
                          (32946, True), (50000, False), (50001, webp_par),
-                         (50002, False), (52546, False)):  # jpegxl keeps the GIL
+                         (50002, False), (52546, False),  # jpegxl keeps the GIL
+                         (34712, j2k_par), (34713, j2k_par)):
         lvl.compression = comp
         assert g._threaded_decode(lvl, 4) is expect
     lvl.compression = 7
@@ -422,6 +426,102 @@ def test_jxl_gray_alpha_refused(fixtures_dir, client, server):
         _render(fixtures_dir, COGJXL2)
     z, x, y = fixture_tile()
     assert client.get(tile_url(server, COGJXL2, z, x, y)).status_code == 404
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_j2k_lossless_fixture_renders(fixtures_dir):
+    """Lossless JPEG 2000 blocks (GDAL's codec 34712, 5/3 wavelet): bit-identical
+    to the deflate fixture - the OpenJPEG lossless round trip is exact."""
+    ref = _rgb_valid(*_render(fixtures_dir, COG4326))
+    assert (_rgb_valid(*_render(fixtures_dir, COGJ2K)) == ref).all()
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_j2k_lossy_fixture_renders(fixtures_dir):
+    """Lossy JPEG 2000 (9/7 wavelet, 40 dB): the flat-color fixture drifts like the
+    other lossy codecs (measured 1.8 / 15)."""
+    ref, refv = _render(fixtures_dir, COG4326)
+    rgb, valid = _render(fixtures_dir, COGJ2KL)
+    assert valid.sum() == refv.sum() > 0
+    diff = np.abs(rgb.astype(int) - ref.astype(int))
+    assert diff.mean() < 2 and diff.max() < 16
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_j2k_gray_fixture(fixtures_dir):
+    """Single-band gray JPEG 2000, written under the 34713 code (GDAL's lossless
+    COMPRESS=JP2000): a codestream may carry one channel, like JXL and unlike
+    WebP - and the red channel of the pattern comes back bit-exact."""
+    ref, _ = _render(fixtures_dir, COG4326)
+    rgb, valid = _render(fixtures_dir, COGJ2KG)
+    assert valid.all()
+    assert (rgb[..., 0] == ref[..., 0]).all()
+    assert (rgb[..., 0] == rgb[..., 1]).all() and (rgb[..., 1] == rgb[..., 2]).all()
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_j2k_rgba_fixture(fixtures_dir):
+    """RGBA JPEG 2000 + ExtraSamples: the codestream's alpha drives coverage
+    exactly like the deflate RGBA fixture (OpenJPEG keeps the 4th component where
+    libwebp drops an all-opaque alpha plane)."""
+    ref = _rgb_valid(*_render(fixtures_dir, COGALPHA))
+    assert (_rgb_valid(*_render(fixtures_dir, COGJ2KA)) == ref).all()
+
+
+def test_j2k_pillow_fallback(fixtures_dir, monkeypatch):
+    """Pillow carries its own OpenJPEG: with imagecodecs hidden the same pixels
+    come back (the fallback is a real path, not a dead branch)."""
+    ics = _rgb_valid(*_render(fixtures_dir, COGJ2K))
+    monkeypatch.setattr(g, "_ic", None)
+    pil = _rgb_valid(*_render(fixtures_dir, COGJ2K))
+    assert (ics == pil).all()
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_j2k_block_guards():
+    """Undecodable bytes surface as a CogError (OpenJPEG's own exception never
+    leaks), and a codestream that disagrees with the level is refused instead of
+    cast into invented pixels: band count, tile shape (shrunken edge blocks are
+    padded to the full tile like WebP/JXL), sample type."""
+    import imagecodecs as ic
+    rng = np.random.default_rng(8)
+    with pytest.raises(g.CogError, match="JPEG 2000"):
+        g.CogFile.__new__(g.CogFile)._decode(_lvl(34712), b"not a codestream")
+    raw = ic.jpeg2k_encode(
+        np.ascontiguousarray(rng.integers(0, 256, (64, 64, 4), dtype=np.uint8)),
+        codecformat="J2K")
+    with pytest.raises(g.CogError, match="JPEG 2000 block shape"):
+        g.CogFile.__new__(g.CogFile)._decode(_lvl(34712), raw)  # 4-ch vs 3 declared
+    lvl = _lvl(34712)
+    lvl.samples = 4
+    assert g.CogFile.__new__(g.CogFile)._decode(lvl, raw).shape == (64, 64, 4)
+    lvl16 = _lvl(34712)
+    lvl16.samples, lvl16.dtype = 1, np.dtype("u1")  # 8-bit level vs 16-bit codestream
+    with pytest.raises(g.CogError, match="JPEG 2000 block dtype"):
+        g.CogFile.__new__(g.CogFile)._decode(
+            lvl16, ic.jpeg2k_encode(np.full((64, 64), 300, np.uint16),
+                                    codecformat="J2K"))
+    shr = ic.jpeg2k_encode(
+        np.ascontiguousarray(rng.integers(0, 256, (40, 64, 3), dtype=np.uint8)),
+        codecformat="J2K")
+    shr_dec = ic.jpeg2k_decode(shr)
+    a = g.CogFile.__new__(g.CogFile)._decode(_lvl(34712), shr)  # 64x64 tile
+    assert a.shape == (64, 64, 3) and (a[:40] == shr_dec).all() and not a[40:].any()
+    small = _lvl(34712)
+    small.tilew = small.tileh = 32
+    with pytest.raises(g.CogError, match="JPEG 2000 block shape"):
+        g.CogFile.__new__(g.CogFile)._decode(small, shr)
+
+
+@pytest.mark.skipif(g._ic is None, reason="imagecodecs is not installed")
+def test_j2k_gray_alpha_refused(fixtures_dir, client, server):
+    """2-sample gray+alpha JPEG 2000 encodes fine and is a real formulation, but
+    our pipeline only applies an alpha band from the 4th sample on: refused at
+    open (404), never half-supported pixels."""
+    with pytest.raises(g.CogError, match="JPEG 2000 blocks must be"):
+        _render(fixtures_dir, COGJ2K2)
+    z, x, y = fixture_tile()
+    assert client.get(tile_url(server, COGJ2K2, z, x, y)).status_code == 404
 
 
 def test_pure_packbits_decode_golden():

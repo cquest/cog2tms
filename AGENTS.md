@@ -81,6 +81,12 @@ pytest-cov, httpx.
   to splice; gray/RGB/RGBA in uint8/uint16/float32 (GDAL's codec set, else
   refused at open), decoded by imagecodecs/libjxl (no Pillow fallback); the
   codestream's shape and sample type are checked against the level,
+  **JPEG 2000 (34712, and 34713 as GDAL spells its lossless `COMPRESS=JP2000`)** —
+  each block is one bare codestream (`FF4F`): no container, and like JXL no
+  tables to splice (OpenJPEG also accepts a boxed JP2 should a writer wrap one);
+  gray/RGB/RGBA in uint8/uint16/uint32 (GDAL's codec set, else refused at open),
+  decoded by imagecodecs/OpenJPEG with a Pillow fallback — both undo the ICT
+  colour transform when the codestream carries one;
   **old-style JPEG**: blocks may lack their tables — GDAL moves the DQT to the IFD
   `JPEGTables` tag 347 (`SOI` + DQT + `FF7F`/`FFD9`/nothing; the DHT stay per
   block, they differ block by block) → splice tag (minus trailing EOI) + block
@@ -165,8 +171,9 @@ would oversubscribe across uvicorn workers.
   zone and the IFD zone near EOF come from disk, pixels/IFDs re-parsed from
   those bytes; coherence is untouched (the row re-anchors `If-Range`).
 - **Block decode in `_POOL`** (`DECODE_THREADS`, gated by `_PAR_MIN_PX` = 1 Mpx):
-  only GIL-free codecs go there (simplejpeg, zlib, imagecodecs LZW and WebP —
-  libwebp releases the GIL, ≈0.3–0.9 ms/128² block, only a handful per tile);
+  only GIL-free codecs go there (simplejpeg, zlib, imagecodecs LZW, WebP and
+  OpenJPEG — libwebp releases the GIL, ≈0.3–0.9 ms/128² block, only a handful
+  per tile; OpenJPEG ≈3.7× at 4 threads, ≈10 ms per 512² lossy block);
   Pillow (JPEG/WebP fallback), imagecodecs PackBits (9 µs) and ZSTD (53 µs)
   stay inline but are fast enough.
 - **Warp = `cv2.remap`** of premultiplied `data*valid` + `valid` + renorm
@@ -318,7 +325,8 @@ JPEG-in-TIFF — also stored the GDAL way, DQT moved to the IFD `JPEGTables` tag
 without SOI) — single-band JPEG, LZW (both dialects)/PackBits/ZSTD/predictor-2,
 lossless + lossy **WebP** blocks (RGB, RGBA+alpha, single-band refused),
 lossless + lossy **JPEG XL** blocks (RGB, RGBA+alpha, gray, 2-sample refused,
-DNG id 52546),
+DNG id 52546), lossless + lossy **JPEG 2000** blocks (RGB, RGBA+alpha, gray under
+the 34713 code, 2-sample refused),
 16-bit single band, GDAL_NODATA, ExtraSamples alpha, 1-bit internal mask (and the
 same file written as **BigTIFF**: version 43, 20-byte IFD entries, LONG8 block index),
 ModelTransformation, unsupported CRS, an EPSG:2056 fixture + its EPSG:3857 twin
@@ -442,6 +450,12 @@ behaviors (do not break):
   pixels, shrunken edge blocks padded, band-count or sample type
   disagreeing with the level
   → `CogError`, no imagecodecs → `CogError` (no Pillow fallback);
+  **JPEG 2000** lossless byte-identical to deflate, lossy within tolerance
+  (1.8 / 15 on the flat fixture), gray levels render under either codec id,
+  RGBA alpha drives `valid`, the **Pillow OpenJPEG fallback is bit-identical**
+  (unlike JXL, Pillow reads J2K), a codestream whose shape or sample width
+  disagrees with the level → `CogError`, 2-sample levels refused at open (404),
+  shrunken edge blocks padded, garbage blocks → `CogError`;
   pooled decode byte-identical to inline;
   `_threaded_decode` gating (GIL-free codec + ≥1 Mpx); the pure-Python fallbacks
   tested directly: `_packbits_decode` golden byte sequences, `_lzw_decode`
@@ -509,7 +523,10 @@ wins, out-of-table EPSG codes (first case 2056, CH1903+ — the hand-written
 approximation was measured up to 1 m off) render through PROJ, absent wheel
 keeps the 400, then the BigTIFF offline fixture: the mask fixture rewritten as
 version 43 by the conftest writer, pinned bit-identical to its classic-TIFF twin
-(the 4 GB+ layout was only exercised by the network COGs before that).
+(the 4 GB+ layout was only exercised by the network COGs before that), then
+JPEG 2000 decode (codecs 34712/34713) through imagecodecs/OpenJPEG with a
+bit-identical Pillow fallback — blocks are bare codestreams, so like JXL there
+is nothing to splice.
 
 ## Follow-ups
 
@@ -540,11 +557,20 @@ version 43 by the conftest writer, pinned bit-identical to its classic-TIFF twin
   `quality=src` via DQT estimation. Rejected for `auto`: webp is smaller than a
   source-quality jpeg re-encode. JPEG-XL *output* also on hold
   (`imagecodecs.jpegxl_*` decodes; Pillow cannot write JXL).
-- Close to free: LERC/CCITT *decode* (new `comp` dispatch branches +
-  fixtures); average-area resampling option (`resampling=`); rescale percentile
+- Close to free: LERC/CCITT *decode* (JPEG 2000 just went in that shape: a
+  `comp` branch, an open-time sample check, conftest fixtures);
+  average-area resampling option (`resampling=`); rescale percentile
   auto; BigTIFF overview masks on more samples (the offline BigTIFF fixture now
   pins the level-0 mask path; masks attached to overview levels stay a
   network-COG case).
+- **JPEG 2000, unverified against GDAL**: the fixtures are written by
+  `imagecodecs.jpeg2k_encode`, because no GDAL here writes J2K-in-GeoTIFF (the
+  system build refuses `COMPRESS=JPEG2000`, rasterio's wheel silently drops it).
+  So two libtiff specifics stay unexercised: **tile-parts** (a block split into
+  codestream fragments, which libtiff concatenates in order) and the ICT/YCC
+  round trip of a GDAL-written codestream. Both decoders we use are OpenJPEG, so
+  the colour transform should be a non-issue; a real GDAL-written file (or a
+  network COG like `Test_jxl.tif`) settles the rest.
 - Known limits: the pure-Python LZW fallback reads only its own variant (libtiff
   output needs imagecodecs); `PNG_COMPRESS` retune (level 0: 6 ms vs 15 ms,
   +13 % bytes) is the last non-dependency perf lever.

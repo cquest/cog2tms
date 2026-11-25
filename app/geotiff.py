@@ -51,13 +51,16 @@ _SUBIFDS = 330  # alternate overview layout: IFD offsets here, chain not used
 _WEBP = 50001  # libtiff's WebP codec id: each block is a whole RIFF/WEBP image
 _JXL, _JXL_DNG = 50002, 52546  # JPEG XL (GDAL/libtiff id; DNG 1.7 spells the same
 # codestream 52546): each block is one standalone bare JXL codestream
+_J2K, _J2K_RO = 34712, 34713  # JPEG 2000 in TIFF (GDAL's COMPRESS=JPEG2000 and the
+# "read only" JP2000 code): each block is one bare codestream (magic FF4F)
 _GEOKEYS, _GEODOUBLE, _JPEGTABLES, _GDAL_NODATA = 34735, 34736, 347, 42113
 
 # human-readable codec names for the TileJSON info block (TIFF tag 259): the
 # duplicate spellings fold together, an unknown code reports its number as is
 _COMP_NAME = {1: "none", 5: "lzw", 6: "jpeg", 7: "jpeg", 8: "deflate",
               32946: "deflate", 32773: "packbits", 50000: "zstd",
-              50001: "webp", 50002: "jpegxl", 52546: "jpegxl"}
+              50001: "webp", 50002: "jpegxl", 52546: "jpegxl",
+              34712: "jpeg2000", 34713: "jpeg2000"}
 
 
 def compression_name(code: int) -> str:
@@ -97,6 +100,8 @@ def _threaded_decode(lvl: "_Level", n: int) -> bool:
         return _ic is not None  # imagecodecs LZW releases the GIL, ours is Python
     if lvl.compression == _WEBP:
         return _ic is not None  # libwebp (imagecodecs) releases the GIL, Pillow not
+    if lvl.compression in (_J2K, _J2K_RO):
+        return _ic is not None  # OpenJPEG (imagecodecs) releases the GIL: 3.7x at 4
     # zlib releases the GIL; imagecodecs PackBits and ZSTD do not (but are fast
     # enough inline: a whole window of them decodes in around a millisecond);
     # JPEG XL keeps the GIL and threads make it worse (measured 0.62x/0.36x at
@@ -259,6 +264,15 @@ class _Level:
             # unlike WebP, single-band gray codestreams are legitimate JXL
             raise CogError("JPEG XL blocks must be gray/RGB/RGBA of "
                            "uint8/uint16/float32")
+        if self.compression in (_J2K, _J2K_RO) and (
+                (self.bps, self.fmt) not in ((8, 1), (16, 1), (32, 1))
+                or self.samples not in (1, 3, 4)
+                or self.photometric != (1 if self.samples == 1 else 2)):
+            # what GDAL's J2K codec writes and OpenJPEG decodes: unsigned 8/16/32-bit
+            # gray/RGB/RGBA. A 1-bit mask or a signed/float sample would be decoded
+            # into invented pixels, so refuse at open, not one 404 per tile
+            raise CogError("JPEG 2000 blocks must be gray/RGB/RGBA of "
+                           "uint8/uint16/uint32")
         if _TILOFFS not in tags or _TILCNTS not in tags:
             raise CogError("missing TileOffsets/TileByteCounts")
         self._lazy = (_TILOFFS, _TILCNTS)
@@ -566,6 +580,12 @@ class CogFile:
                 # invent pixels
                 raise CogError(f"JPEG XL block dtype {a.dtype} != raster {lvl.dtype}")
             return a
+        if comp in (_J2K, _J2K_RO):
+            a = self._decode_j2k(raw, th, tw, s)
+            if a.dtype != lvl.dtype:  # same rule as JPEG XL: the codestream, not a
+                # cast, decides what the samples are
+                raise CogError(f"JPEG 2000 block dtype {a.dtype} != raster {lvl.dtype}")
+            return a
         if comp == 1:
             buf = raw
         elif comp in (8, 32946):
@@ -635,6 +655,36 @@ class CogFile:
             a = a[..., None]
         if a.shape[0] > th or a.shape[1] > tw or a.shape[2] != samples:
             raise CogError(f"unexpected JPEG XL block shape {a.shape}")
+        if a.shape[0] != th or a.shape[1] != tw:  # writer shrank the edge block
+            pad = np.zeros((th, tw, samples), a.dtype)
+            pad[: a.shape[0], : a.shape[1]] = a
+            a = pad
+        return a
+
+    @staticmethod
+    def _decode_j2k(raw: bytes, th: int, tw: int, samples: int) -> np.ndarray:
+        # TIFF JPEG 2000 (GDAL's codecs 34712/34713): each block is one bare
+        # codestream (FF4F) - no container, and unlike JPEG no tables to splice.
+        # imagecodecs wraps OpenJPEG, which also accepts a boxed JP2 and undoes
+        # the ICT colour transform GDAL applies; Pillow's own OpenJPEG is the
+        # fallback. Edge blocks are padded to the full tile size like WebP/JXL.
+        if _ic is not None:
+            try:
+                a = _ic.jpeg2k_decode(raw)
+            except Exception:  # Jpeg2kError, and NotImplementedError on odd streams
+                raise CogError("cannot decode JPEG 2000 block") from None
+        else:  # Pillow fallback: needs a build with OpenJPEG
+            try:
+                im = Image.open(BytesIO(raw))
+                im.load()
+                a = np.asarray(im)
+            except Exception:
+                raise CogError("JPEG 2000 blocks require imagecodecs "
+                               "or a Pillow built with OpenJPEG") from None
+        if a.ndim == 2:  # a gray codestream comes back without channel axis
+            a = a[..., None]
+        if a.shape[0] > th or a.shape[1] > tw or a.shape[2] != samples:
+            raise CogError(f"unexpected JPEG 2000 block shape {a.shape}")
         if a.shape[0] != th or a.shape[1] != tw:  # writer shrank the edge block
             pad = np.zeros((th, tw, samples), a.dtype)
             pad[: a.shape[0], : a.shape[1]] = a

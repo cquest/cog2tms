@@ -7,8 +7,8 @@ import pytest
 from PIL import Image
 
 from .conftest import (BBOX4326, COG12, COG2056, COG3857, COG4326, COGBADCRS, COGCX,
-                       COGFP2, COGJPEG, COGNDJUNK, COGNDNEG, COGPRED3, COGROT,
-                       COGSWISS3857, COGWEBP1, _pyproj, _web, fixture_tile,
+                       COGFP2, COGJ2K, COGJ2K2, COGJPEG, COGNDJUNK, COGNDNEG, COGPRED3,
+                       COGROT, COGSWISS3857, COGWEBP1, _pyproj, _web, fixture_tile,
                        swiss_tile, tile_url)
 
 
@@ -304,6 +304,8 @@ def test_tms_json(client, server, fixtures_dir):
     assert "last_modified" not in info  # fixture server sends no validator
     jpeg = client.get(f"/c2t.tms.json?u={server.base}/{COGJPEG}").json()["cog"]
     assert jpeg["compression"] == "jpeg"  # old-style JPEG-in-TIFF (code 7)
+    j2k = client.get(f"/c2t.tms.json?u={server.base}/{COGJ2K}").json()["cog"]
+    assert j2k["compression"] == "jpeg2000"  # codec 34712, GDAL's COMPRESS=JPEG2000
 
 
 def test_geojson(client, server):
@@ -341,6 +343,7 @@ def test_endpoint_error_paths(client, server):
         (f"{server.base}/junk.txt", 404),                         # not a GeoTIFF
         (f"{server.base}/{COGROT}", 404),                         # rotated raster
         (f"{server.base}/{COGWEBP1}", 404),                       # 1-band WebP level
+        (f"{server.base}/{COGJ2K2}", 404),                        # 2-sample J2K level
         (f"{server.base}/{COG12}", 404),                          # odd BitsPerSample
         (f"{server.base}/{COGCX}", 404),                          # complex samples
         (f"{server.base}/{COGPRED3}", 404),                       # float predictor

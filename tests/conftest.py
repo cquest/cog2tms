@@ -71,7 +71,7 @@ def pattern(half=False):
 
 
 def _block(arr, comp, lzw_ours, predictor, bps, webp_lossless=True,
-           jxl_lossless=True):
+           jxl_lossless=True, j2k_lossless=True):
     """One encoded TIFF block: bit-packed when bps=1 (masks), horizontally
     differenced when predictor=2, then compressed."""
     if bps == 1:
@@ -98,6 +98,11 @@ def _block(arr, comp, lzw_ours, predictor, bps, webp_lossless=True,
         return (_ic.jpegxl_encode(arr, lossless=True) if jxl_lossless
                 else _ic.jpegxl_encode(arr, lossless=False, distance=1.0,
                                        effort=5))
+    if comp in (34712, 34713):  # TIFF JPEG 2000 (GDAL's two codec ids): one bare
+        # codestream per block (FF4F), 5/3 reversible or 9/7 lossy at 40 dB
+        return (_ic.jpeg2k_encode(arr, codecformat="J2K") if j2k_lossless
+                else _ic.jpeg2k_encode(arr, codecformat="J2K", reversible=False,
+                                       level=40))
     if comp == 50000:
         return _ic.zstd_encode(raw)
     if comp == 5:  # TIFF LZW: "ours" = the variant the pure-Python decoder reads
@@ -108,11 +113,12 @@ def _block(arr, comp, lzw_ours, predictor, bps, webp_lossless=True,
 
 
 def _tiles(arr, comp=8, lzw_ours=True, predictor=1, bps=8, webp_lossless=True,
-           jxl_lossless=True):
+           jxl_lossless=True, j2k_lossless=True):
     th = tw = TILE
     h, w = arr.shape[:2]
     return [_block(arr[tj * th:(tj + 1) * th, ti * tw:(ti + 1) * tw],
-                   comp, lzw_ours, predictor, bps, webp_lossless, jxl_lossless)
+                   comp, lzw_ours, predictor, bps, webp_lossless, jxl_lossless,
+                   j2k_lossless)
             for tj in range(h // th) for ti in range(w // tw)]
 
 
@@ -219,7 +225,7 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
               nodata=None, geokeys=None, lzw_ours=True, predictor=1, mask=False,
               rotated=False, subifd=False, holes=False, webp_lossless=True,
               fmt=None, sentinel=None, jpegtables=None, keep_tables=False,
-              bad_tables=False, jxl_lossless=True, big=False):
+              bad_tables=False, jxl_lossless=True, big=False, j2k_lossless=True):
     """Tiled little-endian TIFF (classic, or BigTIFF when big=True: version 43,
     64-bit offsets/counts, LONG8 block index - what gdal_translate switches to
     past 4 GB): level 0 + a 2x internal overview, plus
@@ -230,7 +236,10 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
     count-0 blocks (cog_merger holes: absent data in a merged footprint),
     WebP blocks (compression 50001, lossless unless webp_lossless=False), JPEG XL
     blocks (50002, the GDAL/libtiff codec id, or 52546 as DNG 1.7 spells it: one
-    bare codestream per block, lossless unless jxl_lossless=False), a
+    bare codestream per block, lossless unless jxl_lossless=False), JPEG 2000
+    blocks (34712, or 34713 as GDAL spells its lossless "read only" code: one bare
+    FF4F codestream per block, 5/3 reversible unless j2k_lossless=False drops to
+    9/7 at 40 dB), a
     declared SampleFormat (tag 339: 1 unsigned, 2 signed, 3 float, 4 complex for
     a file that must be refused) with the pattern widened to that depth, or a
     nodata sentinel written over the first column (-9999, NaN: values a reader
@@ -266,7 +275,7 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
         l["fmt_len"] = 2 * l["samples"] if l["fmt"] and 2 * l["samples"] > abis else 0
         l["pred"] = predictor if l["bps"] in (8, 16) or l["fmt"] else 1
     blobs = [_tiles(l["arr"], l["comp"], lzw_ours, l["pred"], l["bps"],
-                    webp_lossless, jxl_lossless)
+                    webp_lossless, jxl_lossless, j2k_lossless)
              for l in lvls]
     tabs = [None] * len(lvls)
     if comp == 7 and jpegtables is not None:  # one tag 347 per level (per IFD)
@@ -569,6 +578,16 @@ def fixtures_dir(tmp_path_factory):
                   geographic=True, comp=52546)  # same blocks, DNG 1.7 codec id
         write_cog(d / "cogjxl2.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
                   geographic=True, comp=50002, samples=2)  # gray+alpha: refused
+        write_cog(d / "cogj2k.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+                  geographic=True, comp=34712)  # lossless JPEG 2000 codestreams
+        write_cog(d / "cogj2kl.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+                  geographic=True, comp=34712, j2k_lossless=False)  # 9/7, 40 dB
+        write_cog(d / "cogj2ka.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+                  geographic=True, comp=34712, samples=4)  # RGBA J2K + ExtraSamples
+        write_cog(d / "cogj2kg.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+                  geographic=True, comp=34713, samples=1)  # gray, "read only" code
+        write_cog(d / "cogj2k2.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+                  geographic=True, comp=34712, samples=2)  # gray+alpha: refused
     write_cog(d / "coglzw.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
               geographic=True, comp=5)  # LZW in the variant _lzw_decode reads
     write_cog(d / "cog16.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
@@ -676,6 +695,11 @@ COGJXLA = "cogjxla.tif"  # RGBA JPEG XL + ExtraSamples (transparent hole)
 COGJXLG = "cogjxlg.tif"  # single-band gray JPEG XL (valid JXL, refused as WebP)
 COGJXLD = "cogjxld.tif"  # JPEG XL blocks under the DNG 1.7 codec id 52546
 COGJXL2 = "cogjxl2.tif"  # 2-sample (gray+alpha) JPEG XL: refused at open
+COGJ2K = "cogj2k.tif"  # lossless JPEG 2000 blocks (GDAL's codec 34712)
+COGJ2KL = "cogj2kl.tif"  # lossy JPEG 2000 blocks (9/7 wavelet, 40 dB)
+COGJ2KA = "cogj2ka.tif"  # RGBA JPEG 2000 + ExtraSamples
+COGJ2KG = "cogj2kg.tif"  # single-band gray J2K, under the 34713 "read only" code
+COGJ2K2 = "cogj2k2.tif"  # 2-sample (gray+alpha) JPEG 2000: refused at open
 COGSUB = "cogsub.tif"  # overviews via SubIFDs (tag 330), empty IFD chain
 COGHOLE = "coghole.tif"  # east block column: count 0 = no-data merger holes
 COGBADCRS = "cogbadcrs.tif"  # geographic EPSG:42304 -> refused
