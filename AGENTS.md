@@ -16,11 +16,14 @@ GET /c2t/{z}/{x}/{y}?u=<cog url>         tile: format=png|jpeg|webp|auto, qualit
                                          (512 by default, 128..1024 multiple of 16),
                                          bidx, rescale, blackmax
 GET /c2t/{z}/{x}/{y}.geojson?u=…         COG footprint ring (debug)
-GET /c2t.tms.json?u=…                    TileJSON (bbox, minzoom/maxzoom; the tile
-                                         template pins size=256 to match its zoom
-                                         math; plus a "cog" provenance block —
-                                         codec name, whole size, Last-Modified —
-                                         all already known from the open)
+GET /c2t.tms.json?u=…                    TileJSON (bbox, minzoom/maxzoom — minzoom
+                                         sits lower when the COG's missing overviews
+                                         can be derived, the "cog" block then says
+                                         "synth": true; the tile template pins
+                                         size=256 to match its zoom math; plus a
+                                         "cog" provenance block — codec name, whole
+                                         size, Last-Modified — all already known
+                                         from the open)
 GET /healthz
 GET /robots.txt                          "User-agent: * Disallow: /c2t" + X-Robots-Tag
                                          (nofollow, noimageindex) on every response
@@ -131,9 +134,19 @@ pytest-cov, httpx.
 
 Overview level chosen so the source window ≥ **tile px** — never resample up
 (the old tile/2 rule halved zoomed-out sharpness, −1.5× gradient energy, for a
-~4× smaller window: not worth it); the window is **not clamped to the raster** —
-`_window` pads outside pixels with zeros + `valid=False` so tiles straddling
-the COG edge go transparent instead of smearing the last row/column → blocks
+~4× smaller window: not worth it); when its own levels run out the pyramid is
+**extended by derived levels** (`CogFile.synth_to`: one contiguous read of the
+smallest level — blocks are jointive, so a whole level is a single range — then
+halved one from the next by coverage-weighted area average until one is at most
+`SYNTH_MIN_PX` (256) wide, kept in memory, only while that smallest level is
+≤ `SYNTH_MAX_PX`, 8192² by default) → the window **is clamped to the level**
+(`_window` still pads the request with zeros + `valid=False`, so tiles
+straddling the COG edge go transparent instead of smearing the last row/column,
+and an outside-window sample contributes 0 to both the premultiplied value and
+the weight, so clamping is pixel-identical) and **bounded** by `MAX_WINDOW_PX`
+(4096²): unbounded, a zoomed-out tile was OpenCV's `SHRT_MAX` assertion in
+`remap` or a 272 GB allocation — a 500 that took the worker with it; now a 404 →
+blocks
 read via `reader.read_many` (adjacent ranges merged within `MERGE_GAP`, groups
 fetched in parallel) → decode inline, or in the shared `_POOL` when the window
 is ≥ 1 Mpx **and** the codec releases the GIL → per-pixel source coords (exact
@@ -284,7 +297,10 @@ Full table with defaults in the README. Gotchas: CORS is `*` on all routes;
 `ALLOW_PRIVATE_NET=1` exists for dev/tests only; `VALIDATE_TTL=-1` disables
 version checks; `MULTIRANGE=0` forces single ranges; `HEAD_CACHE` is off until
 a sqlite path is set (persisted spans are only ever kept for COGs whose
-responses carry ETag/Last-Modified).
+responses carry ETag/Last-Modified); `SYNTH_MAX_PX=0` disables the derived
+overviews, `SYNTH_MIN_PX` is where their halving stops (256 px = one tile) and
+`MAX_WINDOW_PX` is the ceiling that turns an impossible window into a 404
+instead of a dead worker.
 
 ## Test COG files (remote, marked `network`)
 
@@ -331,7 +347,9 @@ the 34713 code, 2-sample refused),
 same file written as **BigTIFF**: version 43, 20-byte IFD entries, LONG8 block index),
 ModelTransformation, unsupported CRS, an EPSG:2056 fixture + its EPSG:3857 twin
 (PROJ fallback, geokeys 2048:4150 + 3072:2056), SubIFD-published overviews (empty chain),
-count-0 merger-hole blocks (bogus past-EOF offsets), **SampleFormat** fixtures
+count-0 merger-hole blocks (bogus past-EOF offsets), a **single-level COG**
+without its pyramid (`no_overview`, plain and with a mask — what
+`CogFile.synth_to` exists for), **SampleFormat** fixtures
 (int8/int16 with a `-9999` sentinel written over the first column, float32 with
 a NaN sentinel, an out-of-range `GDAL_NODATA`, and the refusals: bps 12, complex
 samples, predictor 3, predictor 2 on floats, `GDAL_NODATA="N/A"`), a non-TIFF
@@ -358,7 +376,19 @@ behaviors (do not break):
   TileJSON/GeoJSON/healthz — TileJSON carries the `cog` block (codec name from tag
   259, whole size, `last_modified` **omitted** when the host sends no validator;
   the versioned test server proves the Last-Modified is kept apart from the ETag
-  and re-anchored after a purge+reopen); the same open-error matrix on `.geojson` and
+  and re-anchored after a purge+reopen), and the **derived minzoom**: the projected
+  pair `cog3857.tif` (512+256 pyramid) vs `cog1l3857.tif` (level 0 alone) answers
+  the **same** minzoom because `synth_to` restores the missing 256 px level — with
+  `SYNTH_MAX_PX=0` the single-level file sits one zoom higher and `synth` is
+  absent, and the advertised minzoom really renders (the pair is projected on
+  purpose: the geographic fixtures carry no 3076 unit key, so their zoom math
+  clamps to `MAX_ZOOM` and hides the difference). `synth` only appears when it
+  changes the answer: a COG whose own coarsest level already sits at or under the
+  floor gets neither the flag nor extra zooms (`COG_SMALL`, `COG_BIG`, WebP, JXL —
+  all 128 px), while `COG_MERGED` (1042 px) goes **minzoom 13 → 10** on its derived
+  [521, 261, 131] and those zooms really render. The math reads `cog.own_last`, so
+  a pooled reader that already derived levels cannot leak them into a
+  `SYNTH_MAX_PX=0` answer; the same open-error matrix on `.geojson` and
   `.tms.json`; web UI (`GET /` = map preview page + vendored assets, the dropped
   `/maplibre` route answers 404);
 - **HEAD = GET without the body** on every route (`/healthz`, `robots.txt`,
@@ -421,6 +451,29 @@ behaviors (do not break):
   tiles are unsharp-masked but pixels bordering no-coverage are left untouched
   (no halo on the footprint edge), and level-0 tiles are byte-identical
   whatever `SHARPEN` is set to;
+- **derived overviews** (`conftest` `no_overview=True` fixtures: `cog1lvl.tif`,
+  `cog1lvlm.tif` — level 0 alone): a COG whose pyramid runs out gets levels
+  halved one from the next by **coverage-weighted** area average (an invalid
+  pixel feeds neither the value sum nor the count — no darkening of half-covered
+  pixels, the merger-hole lesson; the average **rounds**, `.astype` would
+  truncate), **one pass down to `SYNTH_MIN_PX`** (256: a narrower level would be
+  upscaled into a tile), appended to `cog.levels` per reader under a lock,
+  idempotent — and both the gate and the TileJSON math read `cog.own_last`, the
+  file's own coarsest level, never a derived one; `synth_floor_px` pinned (512→256,
+  1024→256, 1042→131 — the floor can land under 256 because halving rounds up —
+  260→130, 256→256, 128→128; `SYNTH_MIN_PX=64` → 1042→33); pinned
+  **coverage-identical** to the COG's own pyramid and photometrically within
+  rounding (mean ≤ 0.07, max 2 over z12…z8 — the conftest's own overview is a
+  resampled pattern, not a 2×2 average); derived levels carry the
+  **mask** (more faithful than the fixture's own unmasked overview: 18 018 vs
+  26 950 opaque px at z12); refused above `SYNTH_MAX_PX` (0, W²−1, W² matrix);
+  `_halve` pinned directly for the coverage weight and odd sizes; the window
+  ceiling `MAX_WINDOW_PX` is a **404 naming the setting** (it used to be OpenCV's
+  `SHRT_MAX` assertion or a 272 GB `MemoryError` — a 500 that could take the
+  worker down); measured on `COG_SMALL` with its chain cut at L5: z9 goes from a
+  crash to 2.97 s / 984 KB (one contiguous read, derived [2048, 1024, 512, 256])
+  and pixels within 0.02 mean of the full-pyramid render, and cut at L3 (201 Mpx,
+  over the gate) it is the 404;
 - **byte-range proof**: served bytes ≪ file size, every upstream request has
   `Range:` (the Range rule on the deflate and the tag-347 JPEG fixtures, the
   byte count only on the 200 KB one — the JPEG fixtures are smaller than the
@@ -526,7 +579,14 @@ version 43 by the conftest writer, pinned bit-identical to its classic-TIFF twin
 (the 4 GB+ layout was only exercised by the network COGs before that), then
 JPEG 2000 decode (codecs 34712/34713) through imagecodecs/OpenJPEG with a
 bit-identical Pillow fallback — blocks are bare codestreams, so like JXL there
-is nothing to splice.
+is nothing to splice, then the derived overviews: a COG whose own pyramid runs
+out gets coverage-weighted halved levels in memory behind `SYNTH_MAX_PX`, and
+the source window is clamped to the level and capped by `MAX_WINDOW_PX` — the
+zoomed-out tile that used to ask for 272 GB (or trip OpenCV's `SHRT_MAX`
+assertion) is now a 404. TileJSON advertises the reach the service can actually
+serve: minzoom follows the derived pyramid when `SYNTH_MAX_PX` allows it — halved
+down to `SYNTH_MIN_PX` (256) in one pass — and the `cog` block then carries
+`"synth": true`.
 
 ## Follow-ups
 
@@ -571,6 +631,20 @@ is nothing to splice.
   round trip of a GDAL-written codestream. Both decoders we use are OpenJPEG, so
   the colour transform should be a non-issue; a real GDAL-written file (or a
   network COG like `Test_jxl.tif`) settles the rest.
+- **Zoomed out past the gate** (the other half of the derived overviews, not
+  done): `SYNTH_MAX_PX` (8192²) bounds the one contiguous read that builds the
+  derived levels, so a COG whose *smallest* level is bigger than that answers the
+  404 from `MAX_WINDOW_PX` rather than reading hundreds of MB per tile. The
+  honest fix is a **strided block read** — every k-th block row and column, 1/k²
+  of the bytes and of the decode — to build the coarse levels anyway; it aliases,
+  so it needs a pin against the true area average. Context measured on
+  `COG_SMALL`: blocks are jointive within a level (max 8 B gap), so a whole level
+  is already a single range — what hurts is repeated bytes and RAM, not request
+  count (L5 0.97 MB → 6 derived levels, z9 in 2.97 s). A **tile-space** pyramid
+  (parent from 4 cached child rasters) was measured too: 11 ms and 0 upstream
+  bytes when the children are warm, but **×3.2 bytes when they are not** (z13
+  61 KB direct vs its 4 z14 children 196 KB) — parked, and it would want a raster
+  cache keyed like the tile cache minus format/quality.
 - Known limits: the pure-Python LZW fallback reads only its own variant (libtiff
   output needs imagecodecs); `PNG_COMPRESS` retune (level 0: 6 ms vs 15 ms,
   +13 % bytes) is the last non-dependency perf lever.

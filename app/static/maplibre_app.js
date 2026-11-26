@@ -114,7 +114,8 @@ function renderInfo(tj, gj) {
   if (typeof cog.size === "number") add("size", humanSize(cog.size));
   if (cog.last_modified) add("last modified", cog.last_modified);
   add("bbox", tj.bbox.map((v) => v.toFixed(4)).join(", "));
-  add("zoom", `${tj.minzoom}\u2013${tj.maxzoom} (native)`);
+  // the low end is derived when the tilejson says so: the COG's own pyramid stops higher
+  add("zoom", `${tj.minzoom}\u2013${tj.maxzoom} (${cog.synth ? "native + derived" : "native"})`);
   add("footprint", `${ring.length - 1} vertices`);
   $("info").hidden = false;
 }

@@ -16,7 +16,7 @@ from . import __version__ as version
 from .cogpool import ReaderPool
 from .crs import UnsupportedCRS
 from .empty import empty_tile
-from .geotiff import CogError, compression_name
+from .geotiff import CogError, compression_name, synth_floor_px
 from .httprange import (CogChanged, CogFetch, CogNotFound, CogRedirect,
                         forget, last_modified, revalidate)
 from .security import check_url
@@ -103,6 +103,7 @@ _STATIC = Path(__file__).parent / "static"  # web UI: maplibre.html + vendored m
 app.mount("/static", StaticFiles(directory=_STATIC), name="static")
 
 MIME = {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}
+_TMS_SIZE = 256  # TileJSON zooms assume a 256 px grid: the tile template pins that size
 CACHE = {"Cache-Control": "public, max-age=86400"}
 _tiles_cache: OrderedDict[str, bytes] = OrderedDict()
 _inflight: dict[str, asyncio.Lock] = {}
@@ -369,19 +370,32 @@ def _encode(rgb: np.ndarray, valid: np.ndarray, fmt: str, quality: int) -> bytes
 
 @app.get("/c2t.tms.json", tags=["metadata"], summary="TileJSON of the COG",
          responses={200: {"description": "TileJSON 2.2.0: lon/lat bbox and the zoom range "
-                                         "where the COG holds its native resolution",
+                                         "where the COG holds its native resolution; "
+                                         "minzoom sits lower when the COG's missing "
+                                         "overviews can be derived (cog.synth)",
                           "content": {"application/json": {}}}, **_ERRORS})
 async def tilejson(u: str = Query(..., description="COG url (http/https)")):
     """Returns the TileJSON describing the remote transformed COG."""
     cog = await _open(u)
     bbox = web_bbox_lonlat(cog.web_bbox())
     gsd = cog.psx * cog.unit_m
-    coarse_gsd = gsd * cog.levels[0].width / cog.levels[-1].width
+    last = cog.own_last  # the file's pyramid: a pooled reader may already derive more
+    # the derived pyramid (CogFile.synth_to) halves the COG's smallest level until
+    # one is at most SYNTH_MIN_PX wide, but only while that level is small enough
+    # for the single contiguous read to stay cheap. minzoom follows the level the
+    # service really renders from, derived levels included: past it the warp
+    # upscales, exactly as it does beyond any pyramid
+    floor = (synth_floor_px(last.width) if config.SYNTH_MAX_PX
+             and last.width * last.height <= config.SYNTH_MAX_PX else last.width)
+    synth = floor < last.width
+    coarse_gsd = gsd * cog.levels[0].width / max(floor, 1)
     res0 = 2 * math.pi * crs.R_WEB / 256.0
     # provenance of the source file, free of charge: every value here is what
     # opening the COG already learned (no extra upstream byte)
     info = {"size": cog.reader.size(),
             "compression": compression_name(cog.levels[0].compression)}
+    if synth:  # why minzoom sits lower than the file's own pyramid would give
+        info["synth"] = True
     lm = last_modified(u)  # direct sightings only: behind a redirect nothing is anchored
     if lm:
         info["last_modified"] = lm
@@ -389,7 +403,7 @@ async def tilejson(u: str = Query(..., description="COG url (http/https)")):
         "tilejson": "2.2.0", "name": "cog2tms", "scheme": "xyz",
         # minzoom/maxzoom are computed on a 256 px grid: pin the size so the
         # advertised zooms mean what TileJSON says
-        "tiles": [f"/c2t/{{z}}/{{x}}/{{y}}?u={u}&size=256"],
+        "tiles": [f"/c2t/{{z}}/{{x}}/{{y}}?u={u}&size={_TMS_SIZE}"],
         "bbox": [round(v, 6) for v in bbox],
         "minzoom": max(0, min(config.MAX_ZOOM, math.floor(math.log2(res0 / max(coarse_gsd, 1e-9))))),
         "maxzoom": max(0, min(config.MAX_ZOOM, math.ceil(math.log2(res0 / gsd)))),

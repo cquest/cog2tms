@@ -19,8 +19,7 @@ GET /                                       # interface web : aperçu MapLibre (
 GET /c2t/{z}/{x}/{y}?u=<url du COG>[&format=png|jpeg|webp|auto][&quality=80][&size=512]
                       [&bidx=1,2,3][&rescale=min,max][&blackmax=0]
 GET /c2t/{z}/{x}/{y}.geojson?u=<url du COG> # empreinte du COG (debug)
-GET /c2t.tms.json?u=<url du COG>            # TileJSON (bbox, minzoom/maxzoom + bloc "cog" :
-                                           # codec, taille, Last-Modified du COG)
+GET /c2t.tms.json?u=<url du COG>            # TileJSON (bbox, minzoom/maxzoom et metadonnées COG)
 GET /healthz   GET /robots.txt   GET /static/…   # santé, politique robots, ressources de l'interface
 GET /openapi.json   GET /docs   GET /redoc       # schéma OpenAPI 3.1 + docs (swagger-ui via CDN)
 # toute route ci-dessus répond aussi à HEAD : mêmes en-têtes, pas de corps
@@ -113,6 +112,9 @@ décodage threadé, LRU de tuiles avec verrous single-flight) :
 | `MULTIRANGE` | `1` | plusieurs gammes par GET (multipart/byteranges) ; le refus est mémorisé par hôte |
 | `HEAD_PREFETCH` | `65536` | lecture en bloc de l'en-tête (octets) absorbant l'analyse IFD/balises à l'ouverture (`0` désactive) |
 | `HEAD_CACHE` | — | fichier sqlite conservant ces plages d'en-tête après un redémarrage (COG avec ETag/Last-Modified uniquement, lignes bornées 4096 + TTL 30 j) ; vide désactive |
+| `SYNTH_MAX_PX` | `67108864` | overviews dérivées quand la pyramide du COG s'arrête : plus grand plus-petit-niveau (px) justifiant une lecture contiguë unique + division par deux (`0` désactive) |
+| `SYNTH_MIN_PX` | `256` | où s'arrête cette division : le dernier niveau dérivé fait au plus cette largeur (en dessous il serait agrandi dans la tuile) |
+| `MAX_WINDOW_PX` | `16777216` | plafond de la fenêtre source qu'une tuile peut lire : au-delà un 404, plutôt qu'une assertion OpenCV ou une allocation géante |
 | `HTTP_CONNECT_TIMEOUT` / `HTTP_READ_TIMEOUT` | `10` / `30` | délais d'attente amont (s) |
 | `HTTP_RETRIES` / `HTTP_BACKOFF` | `2` / `0,3` | retries transparents sur 429/5xx (`0` désactive) |
 | `HTTP2` | `1` | HTTP/2 vers les hôtes qui le proposent (ALPN) ; `0` épingle HTTP/1.1 |

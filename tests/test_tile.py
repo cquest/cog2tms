@@ -6,10 +6,11 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from .conftest import (BBOX4326, COG12, COG2056, COG3857, COG4326, COGBADCRS, COGCX,
-                       COGFP2, COGJ2K, COGJ2K2, COGJPEG, COGNDJUNK, COGNDNEG, COGPRED3,
-                       COGROT, COGSWISS3857, COGWEBP1, _pyproj, _web, fixture_tile,
-                       swiss_tile, tile_url)
+from app import config
+from .conftest import (BBOX4326, COG12, COG1L, COG1L3857, COG2056, COG3857, COG4326,
+                       COGBADCRS, COGCX, COGFP2, COGJ2K, COGJ2K2, COGJPEG, COGNDJUNK,
+                       COGNDNEG, COGPRED3, COGROT, COGSWISS3857, COGWEBP1, _pyproj,
+                       _web, fixture_tile, swiss_tile, tile_url)
 
 
 def test_healthz(client):
@@ -308,6 +309,28 @@ def test_tms_json(client, server, fixtures_dir):
     assert j2k["compression"] == "jpeg2000"  # codec 34712, GDAL's COMPRESS=JPEG2000
 
 
+def test_tilejson_advertises_derived_overviews(client, server, monkeypatch):
+    """minzoom follows the pyramid the service can actually serve, not only the one
+    the file carries: the same EPSG:3857 box written without its 256 px overview
+    would stop one zoom higher, and CogFile.synth_to deriving it brings minzoom back
+    to the twin's - the cog block says why. SYNTH_MAX_PX=0 takes both the lower
+    minzoom and the flag away. A COG whose own coarsest level already sits at the
+    tile grid gains neither reach nor flag: a narrower derived level is blurrier,
+    not sharper."""
+    own = client.get(f"/c2t.tms.json?u={server.base}/{COG3857}").json()
+    one = client.get(f"/c2t.tms.json?u={server.base}/{COG1L3857}").json()
+    assert one["cog"]["synth"] is True and "synth" not in own["cog"]
+    assert one["minzoom"] == own["minzoom"]  # the derived 256 px level restores it
+    assert one["maxzoom"] == own["maxzoom"]
+    r = client.get(tile_url(server, COG1L3857, *fixture_tile(one["minzoom"])))
+    assert r.status_code == 200  # the advertised zoom really renders
+    monkeypatch.setattr(config, "SYNTH_MAX_PX", 0)
+    off = client.get(f"/c2t.tms.json?u={server.base}/{COG1L3857}").json()
+    twin = client.get(f"/c2t.tms.json?u={server.base}/{COG3857}").json()
+    assert off["minzoom"] == own["minzoom"] + 1 and "synth" not in off["cog"]
+    assert twin["minzoom"] == own["minzoom"]  # already at the tile grid: no gain
+
+
 def test_geojson(client, server):
     z, x, y = fixture_tile()
     r = client.get(f"/c2t/{z}/{x}/{y}.geojson?u={server.base}/{COG4326}")
@@ -355,6 +378,15 @@ def test_endpoint_error_paths(client, server):
         for u, want in cases:
             r = client.get(path, params={"u": u})
             assert r.status_code == want, (path, u, r.status_code)
+
+
+def test_window_ceiling_is_a_404(client, server, monkeypatch):
+    """MAX_WINDOW_PX: a tile whose source window would be the whole raster used to
+    reach OpenCV's SHRT_MAX assertion in remap, or a 272 GB allocation - both a 500
+    that can take the worker with it. Now a 404 naming the setting."""
+    monkeypatch.setattr(config, "MAX_WINDOW_PX", 1000)
+    r = client.get(tile_url(server, COG1L, *fixture_tile()))
+    assert r.status_code == 404 and "MAX_WINDOW_PX" in r.json()["detail"]
 
 
 def test_nodata_out_of_range_renders(client, server):

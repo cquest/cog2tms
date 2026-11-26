@@ -13,6 +13,7 @@ TileOffsets/TileByteCounts are fetched lazily, per overview level, so opening a
 COG stays cheap.
 """
 import struct
+import threading
 import zlib
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -321,6 +322,65 @@ class _Level:
         self.offsets, self.counts = arrs
 
 
+class _Synth:
+    """A derived overview level: the level below, halved by area average, kept in
+    memory. Appended to CogFile.levels so the level pick, the exact decimation
+    factor and window() treat it like an internal overview the COG lacks."""
+
+    def __init__(self, data, valid):
+        self.data, self.valid = data, valid
+        self.height, self.width = data.shape[:2]
+
+
+def _halve(data, valid):
+    """Halve a level by 2x2 area average, weighted by coverage: an invalid pixel
+    feeds neither the value sum nor the count, so a half-covered output pixel
+    keeps the brightness of its valid half instead of being darkened by the black
+    of its no-data part (the black smear the merger holes taught us to refuse).
+    Odd edges pad with no coverage; bands keep the accumulation scratch bounded."""
+    h, w, s = data.shape
+    if h % 2 or w % 2:
+        data = np.pad(data, ((0, h % 2), (0, w % 2), (0, 0)))
+        valid = np.pad(valid, ((0, h % 2), (0, w % 2)))
+        h, w = valid.shape  # the halving grid follows the padded size
+    h2, w2 = h // 2, w // 2
+    out = np.zeros((h2, w2, s), dtype=data.dtype)
+    ov = np.zeros((h2, w2), dtype=bool)
+    for r0 in range(0, h2, 256):
+        r1 = min(r0 + 256, h2)
+        cnt = valid[2 * r0:2 * r1].reshape(r1 - r0, 2, w2, 2).sum(axis=(1, 3))
+        sv = data[2 * r0:2 * r1].reshape(r1 - r0, 2, w2, 2, s).sum(axis=(1, 3),
+                                                                    dtype=np.float64)
+        np.divide(sv, cnt[..., None], out=sv, where=cnt[..., None] > 0)
+        if not np.issubdtype(data.dtype, np.floating):
+            np.rint(sv, out=sv)  # .astype truncates: a 2x2 average must round
+        ov[r0:r1] = cnt > 0
+        out[r0:r1] = sv
+    return out, ov
+
+
+def _synth_window(l: _Synth, c0: int, r0: int, c1: int, r1: int):
+    """Slice a derived level with the same outside-is-no-coverage padding the
+    block reader gives a window reaching past the raster."""
+    c0, r0, c1, r1 = int(c0), int(r0), int(c1), int(r1)
+    out = np.zeros((r1 - r0, c1 - c0, l.data.shape[2]), dtype=l.data.dtype)
+    valid = np.zeros((r1 - r0, c1 - c0), dtype=bool)
+    a0, b0, a1, b1 = max(c0, 0), max(r0, 0), min(c1, l.width), min(r1, l.height)
+    if a0 < a1 and b0 < b1:
+        out[b0 - r0:b1 - r0, a0 - c0:a1 - c0] = l.data[b0:b1, a0:a1]
+        valid[b0 - r0:b1 - r0, a0 - c0:a1 - c0] = l.valid[b0:b1, a0:a1]
+    return out, valid
+
+
+def synth_floor_px(width: int) -> int:
+    """Width the derived pyramid ends at: halve while the level is wider than
+    SYNTH_MIN_PX, so the last one is at most that wide. The halving rounds up
+    (an odd edge is padded), which is what _halve does."""
+    while width > config.SYNTH_MIN_PX:
+        width = (width + 1) // 2
+    return width
+
+
 class CogFile:
     def __init__(self, reader):
         self.reader = reader
@@ -345,6 +405,8 @@ class CogFile:
             reader.prefetch(ifd_off, config.HEAD_PREFETCH)
 
         self.levels: list[_Level] = []
+        self.synth: list[_Synth] = []  # derived overviews, appended to levels on demand
+        self._synth_lock = threading.Lock()
         self.masks: list[_Level] = []  # alpha masks (NewSubfileType & 4)
         tags0 = None
         while ifd_off:
@@ -486,10 +548,42 @@ class CogFile:
         return ring
 
     # --- pixel windows ------------------------------------------------------
+    @property
+    def own_last(self) -> _Level:
+        """The COG's own coarsest level, ignoring any derived one: the gate and the
+        TileJSON zoom math must both read the file's pyramid, not our own."""
+        return self.levels[len(self.levels) - len(self.synth) - 1]
+
+    def synth_to(self) -> bool:
+        """Extend the pyramid when the COG's own levels run out: read its
+        smallest level once (blocks are jointive, so a whole level is a single
+        byte-range) and halve it by area average, each derived level from the
+        previous one, until one is at most SYNTH_MIN_PX wide. Refused unless
+        that smallest level is small enough for the read to stay cheap - an
+        unbounded pass over a 100 Gpx raster would be an outage.
+        Returns True if derived levels are now available."""
+        last = self.own_last
+        if not config.SYNTH_MAX_PX or last.width <= config.SYNTH_MIN_PX:
+            return False  # the COG already reaches the floor: nothing to derive
+        if last.width * last.height > config.SYNTH_MAX_PX:
+            return False
+        with self._synth_lock:  # concurrent tiles of one COG build it once
+            if self.synth:  # built once per reader, down to the floor
+                return True
+            data, valid = self.window(len(self.levels) - len(self.synth) - 1,
+                                      0, 0, last.width, last.height)
+            while data.shape[1] > config.SYNTH_MIN_PX:
+                data, valid = _halve(data, valid)
+                self.synth.append(_Synth(data, valid))
+            self.levels += self.synth  # visible to the level pick
+            return True
+
     def window(self, level: int, c0: int, r0: int, c1: int, r1: int):
         """Read [c0:c1, r0:r1] of overview `level`; outside pixels valid=False.
         Applies the coverage mask, nodata and band selection when present."""
         lvl = self.levels[level]
+        if isinstance(lvl, _Synth):  # derived level: in memory, coverage and nodata
+            return _synth_window(lvl, c0, r0, c1, r1)  # already applied when built
         out, valid = self._window(lvl, level, c0, r0, c1, r1)
         for m in self.masks:
             if m.width == lvl.width and m.height == lvl.height:

@@ -225,10 +225,12 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
               nodata=None, geokeys=None, lzw_ours=True, predictor=1, mask=False,
               rotated=False, subifd=False, holes=False, webp_lossless=True,
               fmt=None, sentinel=None, jpegtables=None, keep_tables=False,
-              bad_tables=False, jxl_lossless=True, big=False, j2k_lossless=True):
+              bad_tables=False, jxl_lossless=True, big=False, j2k_lossless=True,
+              no_overview=False):
     """Tiled little-endian TIFF (classic, or BigTIFF when big=True: version 43,
     64-bit offsets/counts, LONG8 block index - what gdal_translate switches to
-    past 4 GB): level 0 + a 2x internal overview, plus
+    past 4 GB): level 0 + a 2x internal overview (no_overview=True writes level 0
+    alone, the COG without a pyramid that CogFile.synth_to exists for), plus
     optional extras - a 1-bit internal coverage mask (NewSubfileType & 4), a
     horizontal-differencing predictor, GDAL_NODATA, ExtraSamples=ALPHA, a
     ModelTransformation (rotated raster, which the reader must refuse),
@@ -263,6 +265,9 @@ def write_cog(path, ox, oy, psx, psy, geographic, comp=8, samples=3, bps=8,
     phot = 6 if (comp == 7 and samples == 3) else (1 if samples == 1 else 2)
     lvls = [dict(arr=a, sub=sub, samples=samples, bps=bps, comp=comp, phot=phot, geo=True)
             for a, sub in ((src, 0), (src_h, 1))]
+    if no_overview:  # a COG written without its internal pyramid: level 0 alone,
+        # which is what CogFile.synth_to exists for
+        lvls = [l for l in lvls if not l["sub"]]
     if mask:  # coverage: the west third of the raster is no-data
         bits = np.zeros((H, W), np.uint8)
         bits[:, W // 3:] = 1
@@ -523,6 +528,10 @@ def fixtures_dir(tmp_path_factory):
     x0, y1 = _web(w0, n0)
     x1, y0 = _web(e0, s0)
     write_cog(d / "cog3857.tif", x0, y1, (x1 - x0) / W, (y1 - y0) / H, geographic=False)
+    # the same box, projected, without its pyramid: the pair pins what CogFile.synth_to
+    # adds (projected so the TileJSON zoom math sees metres, not degrees)
+    write_cog(d / "cog1l3857.tif", x0, y1, (x1 - x0) / W, (y1 - y0) / H,
+              geographic=False, no_overview=True)
     if _pyproj:  # CH1903+/LV95 grid, plus the 3857 twin of the same box:
         # rendering both must match - a missing CH1903+ datum shift (270 m)
         # would put the 2056 tile 40 px away at this zoom
@@ -588,6 +597,10 @@ def fixtures_dir(tmp_path_factory):
                   geographic=True, comp=34713, samples=1)  # gray, "read only" code
         write_cog(d / "cogj2k2.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
                   geographic=True, comp=34712, samples=2)  # gray+alpha: refused
+    write_cog(d / "cog1lvl.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, no_overview=True)  # no pyramid: derived overviews
+    write_cog(d / "cog1lvlm.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
+              geographic=True, no_overview=True, mask=True)  # ... and with a mask
     write_cog(d / "coglzw.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
               geographic=True, comp=5)  # LZW in the variant _lzw_decode reads
     write_cog(d / "cog16.tif", w0, n0, (e0 - w0) / W, (n0 - s0) / H,
@@ -666,6 +679,7 @@ def client(fixtures_dir):
 
 COG4326 = "cog4326.tif"
 COG3857 = "cog3857.tif"
+COG1L3857 = "cog1l3857.tif"  # the 3857 box again, level 0 only (no pyramid)
 COGJPEG = "cogjpeg.tif"  # same content, JPEG-in-TIFF blocks (compression 7)
 COGJPEG1 = "cogjpeg1.tif"  # same, single-band JPEG blocks
 COGJPT = "cogjpt.tif"  # JPEG blocks without DQT + IFD tag 347 (the GDAL layout)
@@ -700,6 +714,8 @@ COGJ2KL = "cogj2kl.tif"  # lossy JPEG 2000 blocks (9/7 wavelet, 40 dB)
 COGJ2KA = "cogj2ka.tif"  # RGBA JPEG 2000 + ExtraSamples
 COGJ2KG = "cogj2kg.tif"  # single-band gray J2K, under the 34713 "read only" code
 COGJ2K2 = "cogj2k2.tif"  # 2-sample (gray+alpha) JPEG 2000: refused at open
+COG1L = "cog1lvl.tif"  # level 0 only, no internal overview
+COG1LM = "cog1lvlm.tif"  # level 0 only, with the 1-bit coverage mask
 COGSUB = "cogsub.tif"  # overviews via SubIFDs (tag 330), empty IFD chain
 COGHOLE = "coghole.tif"  # east block column: count 0 = no-data merger holes
 COGBADCRS = "cogbadcrs.tif"  # geographic EPSG:42304 -> refused

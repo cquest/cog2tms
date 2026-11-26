@@ -68,6 +68,21 @@ SHARPEN = float(os.getenv("SHARPEN", "0.3"))
 # round-trips at open; 0 disables
 HEAD_PREFETCH = int(os.getenv("HEAD_PREFETCH", "65536"))
 
+# when a COG has no overview deep enough for a tile, derive one by averaging its
+# smallest level - only if that level is small enough for one contiguous read to
+# be cheap (blocks are jointive, so a whole level is a single range). 0 disables
+SYNTH_MAX_PX = int(os.getenv("SYNTH_MAX_PX", str(8192 * 8192)))
+
+# how far that derived pyramid goes: levels are halved one from the next until
+# one is at most this wide. 256 = the TileJSON tile grid - a narrower level is
+# upscaled into a tile, so it would buy bytes, not detail
+SYNTH_MIN_PX = max(1, int(os.getenv("SYNTH_MIN_PX", "256")))
+
+# hard cap on the source window one tile may read: an unbounded window means
+# OpenCV's SHRT_MAX assertion in remap or a 272 GB allocation (the premultiplied
+# float32 arrays cost ~16 B/px), which kills the worker instead of the request
+MAX_WINDOW_PX = int(os.getenv("MAX_WINDOW_PX", str(4096 * 4096)))
+
 # sqlite file persisting prefetched head spans across restarts (only for COGs
 # whose responses carry ETag/Last-Modified); empty disables
 HEAD_CACHE = os.getenv("HEAD_CACHE", "")

@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from . import config, crs
+from .geotiff import CogError
 
 cv2.setNumThreads(1)  # 256 px warps: OpenCV's internal threading gains nothing and
 # would oversubscribe the cores between uvicorn workers
@@ -52,11 +53,15 @@ def tile_exists(cog, z, x, y) -> bool:
 def _pick_level(cog, span_main_px: float, size: int) -> int:
     """Largest overview whose window stays >= size pixels: never resample up
     (size/2 was tried and made zoomed-out tiles visibly soft - the pyramid can
-    always be read at full tile resolution without fetching that much more)."""
+    always be read at full tile resolution without fetching that much more).
+    When the COG's own levels run out, ask for derived ones (CogFile.synth_to)."""
     w0 = cog.levels[0].width
     level = 0
     while level + 1 < len(cog.levels) and span_main_px * cog.levels[level + 1].width / w0 >= size:
         level += 1
+    if level + 1 == len(cog.levels) and cog.synth_to():
+        while level + 1 < len(cog.levels) and span_main_px * cog.levels[level + 1].width / w0 >= size:
+            level += 1
     return level
 
 
@@ -85,12 +90,21 @@ def render_tile(cog, z: int, x: int, y: int, size: int,
     level = _pick_level(cog, c1 - c0, size)
     lvl = cog.levels[level]
     scale = lvl0.width / lvl.width  # exact decimation factor of this overview
-    # window past the raster on purpose: _window pads with valid=False, which keeps
-    # tiles straddling the COG edge transparent instead of smearing edge pixels
-    wc0 = int(np.floor(c0 / scale)) - 1
-    wr0 = int(np.floor(r0 / scale)) - 1
-    wc1 = int(np.ceil(c1 / scale)) + 1
-    wr1 = int(np.ceil(r1 / scale)) + 1
+    # window clamped to the level, and bounded: a pixel outside the window
+    # contributes 0 to both the premultiplied value and the coverage weight
+    # (BORDER_CONSTANT), exactly as the valid=False padding of an outside-raster
+    # pixel did, so this is pixel-identical - while an unclamped window asks for
+    # a window the size of the raster (a z0 tile over a 100 Gpx COG wanted 272 GB
+    # and killed the worker)
+    wc0 = max(int(np.floor(c0 / scale)), 0)
+    wr0 = max(int(np.floor(r0 / scale)), 0)
+    wc1 = min(int(np.ceil(c1 / scale)), lvl.width)
+    wr1 = min(int(np.ceil(r1 / scale)), lvl.height)
+    if wc1 <= wc0 or wr1 <= wr0:
+        raise EmptyTile()
+    if (wc1 - wc0) * (wr1 - wr0) > config.MAX_WINDOW_PX:
+        raise CogError(f"tile needs a {wc1 - wc0}x{wr1 - wr0} source window, "
+                       f"over MAX_WINDOW_PX={config.MAX_WINDOW_PX}")
 
     data, valid = cog.window(level, wc0, wr0, wc1, wr1)
     if bidx:

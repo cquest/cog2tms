@@ -12,9 +12,10 @@ from app import config
 from app import geotiff as g
 from app import tiles
 from app.httprange import LocalReader
-from .conftest import (COG12, COG16, COG4326, COGALPHA, COGBIG, COGCX, COGF32, COGFP2,
-                       COGHOLE, COGI8, COGI16, COGMASK, COGND, COGNDJUNK, COGNDNEG,
-                       COGPRED3, COGROT, COGSUB, W, fixture_tile, write_cog)
+from .conftest import (COG12, COG16, COG1L, COG1LM, COG4326, COGALPHA, COGBIG, COGCX,
+                       COGF32, COGFP2, COGHOLE, COGI8, COGI16, COGMASK, COGND,
+                       COGNDJUNK, COGNDNEG, COGPRED3, COGROT, COGSUB, W, fixture_tile,
+                       write_cog)
 
 
 def _open(fixtures_dir, name):
@@ -236,6 +237,133 @@ def test_bigtiff_fixture(fixtures_dir):
         cog.close()
     rrgb, rvalid = _render(fixtures_dir, COGMASK)
     assert (rgb == rrgb).all() and (valid == rvalid).all()
+
+
+def test_synth_overviews_match_the_cogs_own_pyramid(fixtures_dir):
+    """A COG written without internal overviews (level 0 alone) renders the same
+    tiles as its twin that has them: CogFile.synth_to reads level 0 once - blocks
+    are jointive, so a whole level is a single byte-range - and halves it by area
+    average, each level from the previous one, down to the SYNTH_MIN_PX floor -
+    256 px, one tile at the lowest zoom the tilejson then advertises. That is what
+    the COG's own overview holds, and coverage stays exactly the same."""
+    ref, one = _open(fixtures_dir, COG4326), _open(fixtures_dir, COG1L)
+    try:
+        assert [l.width for l in one.levels] == [W]  # no pyramid to start with
+        for z in (12, 11, 10, 9, 8):
+            a = tiles.render_tile(ref, *fixture_tile(z=z), 256)
+            b = tiles.render_tile(one, *fixture_tile(z=z), 256)
+            assert (a[1] == b[1]).all()  # coverage identical at every zoom
+            diff = np.abs(a[0].astype(int) - b[0].astype(int))
+            # the fixture's own overview is a resampled pattern, not an average, so
+            # the two pyramids differ by rounding only (mean <= 0.07, max 2 measured)
+            assert diff.mean() < 0.1 and diff.max() <= 2
+            # one pass, all the way to the floor: 512 -> 256, then it stops -
+            # a narrower level would be upscaled into a 256 px tile
+            assert [s.width for s in one.synth] == [256]
+    finally:
+        ref.close()
+        one.close()
+
+
+def test_synth_stops_at_the_floor(fixtures_dir, monkeypatch):
+    """SYNTH_MIN_PX is where the derived pyramid ends, and the level pick sees the
+    whole chain at once (not one level per request). A COG whose own coarsest level
+    already reaches the floor gets nothing derived: below it a level is upscaled
+    into a tile, which buys bytes, not detail."""
+    assert [g.synth_floor_px(w) for w in (512, 1024, 1042, 260, 256, 128)] == \
+        [256, 256, 131, 130, 256, 128]  # halving rounds up, like _halve
+    with monkeypatch.context() as m:  # the chain follows the knob
+        m.setattr(config, "SYNTH_MIN_PX", 64)
+        assert g.synth_floor_px(1042) == 33  # 1042 -> 521 -> 261 -> 131 -> 66 -> 33
+    cog = _open(fixtures_dir, COG1L)
+    try:
+        assert cog.synth_to() and [s.width for s in cog.synth] == [256]
+        assert [l.width for l in cog.levels] == [W, 256]  # visible to the pick
+        assert cog.synth_to() and len(cog.synth) == 1  # idempotent
+    finally:
+        cog.close()
+    twin = _open(fixtures_dir, COG4326)  # its own pyramid already reaches 256
+    try:
+        assert not twin.synth_to() and not twin.synth
+    finally:
+        twin.close()
+
+
+def test_synth_is_refused_above_the_gate(fixtures_dir, monkeypatch):
+    """SYNTH_MAX_PX bounds the one contiguous read the synthesis needs: level 0
+    bigger than the gate is never walked (an unbounded pass over a huge raster
+    would be an outage, not a slow tile). 0 turns the feature off."""
+    cog = _open(fixtures_dir, COG1L)
+    try:
+        monkeypatch.setattr(config, "SYNTH_MAX_PX", 0)
+        assert not cog.synth_to() and not cog.synth
+        monkeypatch.setattr(config, "SYNTH_MAX_PX", W * W - 1)
+        assert not cog.synth_to() and not cog.synth
+        monkeypatch.setattr(config, "SYNTH_MAX_PX", W * W)
+        assert cog.synth_to() and [s.width for s in cog.synth] == [256]
+    finally:
+        cog.close()
+
+
+def test_halve_weights_the_average_by_coverage():
+    """An invalid pixel feeds neither the value sum nor the count: a half-covered
+    output pixel keeps the brightness of its valid half, where a plain average
+    would darken it by the black of its no-data part (the merger-hole lesson).
+    Odd edges average what is there instead of padding with black."""
+    data, valid = np.zeros((2, 2, 3), np.uint8), np.zeros((2, 2), bool)
+    data[0, 0] = 200
+    valid[0, 0] = True
+    out, ov = g._halve(data, valid)
+    assert ov.tolist() == [[True]] and out[0, 0].tolist() == [200, 200, 200]
+    out, ov = g._halve(np.zeros((2, 2, 3), np.uint8), np.zeros((2, 2), bool))
+    assert not ov.any() and not out.any()  # no coverage stays no coverage
+    data, valid = np.full((3, 3, 1), 7, np.uint8), np.ones((3, 3), bool)
+    out, ov = g._halve(data, valid)  # odd size: 2x2 output, no black row/column
+    assert out.shape == (2, 2, 1) and ov.all() and (out == 7).all()
+
+
+def test_synth_levels_carry_the_mask(fixtures_dir):
+    """The pyramid is built from window() of level 0, so the 1-bit internal mask is
+    already applied when the levels are halved: coverage survives zooming out.
+    (The fixture with its own overview has the mask on level 0 only - masks match
+    by dims - so the derived path is the more faithful of the two, not the less.)"""
+    masked, plain = _open(fixtures_dir, COG1LM), _open(fixtures_dir, COG1L)
+    try:
+        t = fixture_tile(z=12)
+        a, b = tiles.render_tile(masked, *t, 256), tiles.render_tile(plain, *t, 256)
+        assert 0 < a[1].sum() < b[1].sum()  # the masked third stays transparent
+        assert not (a[1] & ~b[1]).any()  # ... and never the other way round
+    finally:
+        masked.close()
+        plain.close()
+
+
+def test_synth_levels_are_per_reader(fixtures_dir):
+    """Derived levels live on the reader, so a purge + reopen (a COG replaced under
+    one URL) cannot mix them with the new file's pixels."""
+    a = _open(fixtures_dir, COG1L)
+    b = _open(fixtures_dir, COG1L)
+    try:
+        assert a.synth_to() and a.synth
+        assert not b.synth and [l.width for l in b.levels] == [W]
+    finally:
+        a.close()
+        b.close()
+
+
+def test_window_ceiling_is_a_clean_error(fixtures_dir, monkeypatch):
+    """MAX_WINDOW_PX: before the clamp, a tile whose window reached the whole
+    raster hit OpenCV's SHRT_MAX assertion in remap or a 272 GB allocation - both
+    escape as a 500 and can take the worker down. Now a CogError (a 404 at the
+    endpoint), and the clamp itself changes no pixel: an outside-window sample
+    contributes 0 to value and coverage, exactly as the old padding did."""
+    cog = _open(fixtures_dir, COG1L)
+    try:
+        monkeypatch.setattr(config, "MAX_WINDOW_PX", 1000)
+        with pytest.raises(g.CogError, match="over MAX_WINDOW_PX"):
+            tiles.render_tile(cog, *fixture_tile(), 256)
+    finally:
+        cog.close()
 
 
 def test_count_zero_blocks_are_holes(fixtures_dir):

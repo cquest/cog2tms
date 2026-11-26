@@ -19,8 +19,7 @@ GET /                                       # web UI: MapLibre preview (vector b
 GET /c2t/{z}/{x}/{y}?u=<COG url>[&format=png|jpeg|webp|auto][&quality=80][&size=512]
                       [&bidx=1,2,3][&rescale=min,max][&blackmax=0]
 GET /c2t/{z}/{x}/{y}.geojson?u=<COG url>   # COG footprint (debug)
-GET /c2t.tms.json?u=<COG url>              # TileJSON (bbox, minzoom/maxzoom + "cog"
-                                           # block: codec, size, Last-Modified of the COG)
+GET /c2t.tms.json?u=<COG url>              # TileJSON (bbox, minzoom/maxzoom and COG metadata)
 GET /healthz   GET /robots.txt   GET /static/…   # health, robots policy, UI assets
 GET /openapi.json   GET /docs   GET /redoc       # OpenAPI 3.1 + docs (swagger-ui from a CDN)
 # every route above also answers HEAD: same headers, no body
@@ -110,6 +109,9 @@ LRU with single-flight locks): [AGENTS.md](AGENTS.md).
 | `MULTIRANGE` | `1` | several ranges per GET (multipart/byteranges); rejection remembered per host |
 | `HEAD_PREFETCH` | `65536` | bulk head read (bytes) absorbing IFD/tag parsing at open (`0` disables) |
 | `HEAD_CACHE` | — | sqlite file persisting those head spans across restarts (COGs with ETag/Last-Modified only, rows bounded 4096 + 30-day TTL); empty disables |
+| `SYNTH_MAX_PX` | `67108864` | derived overviews when the COG's own pyramid runs out: largest smallest level (px) worth one contiguous read + halving (`0` disables) |
+| `SYNTH_MIN_PX` | `256` | how far that halving goes: the last derived level is at most this wide (a narrower one would be upscaled into a tile) |
+| `MAX_WINDOW_PX` | `16777216` | ceiling on the source window one tile may read: beyond it a 404, instead of an OpenCV assertion or a huge allocation |
 | `HTTP_CONNECT_TIMEOUT` / `HTTP_READ_TIMEOUT` | `10` / `30` | upstream timeouts (s) |
 | `HTTP_RETRIES` / `HTTP_BACKOFF` | `2` / `0.3` | transparent retries on 429/5xx (`0` disables) |
 | `HTTP2` | `1` | HTTP/2 to hosts offering it (ALPN); `0` pins HTTP/1.1 |
